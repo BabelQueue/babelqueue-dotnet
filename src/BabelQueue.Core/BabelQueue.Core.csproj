@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- NuGet package metadata -->
+    <PackageId>BabelQueue.Core</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Muhammet Şafak</Authors>
+    <Company>BabelQueue</Company>
+    <Description>Polyglot Queues, Simplified — the framework-agnostic .NET core: the canonical BabelQueue wire-envelope codec, contracts and dead-letter helpers. Zero dependencies.</Description>
+    <PackageProjectUrl>https://babelqueue.com</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/BabelQueue/babelqueue-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>queue;polyglot;microservices;json;envelope;messaging;rabbitmq;redis</PackageTags>
+    <Copyright>Copyright (c) 2026 Muhammet Şafak</Copyright>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
