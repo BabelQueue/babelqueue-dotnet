@@ -235,7 +235,7 @@ public static class EnvelopeCodec
     private static long GetLong(JsonElement obj, string name, long fallback)
         => Prop(obj, name) is { ValueKind: JsonValueKind.Number } e && e.TryGetInt64(out var l) ? l : fallback;
 
-    private static IReadOnlyDictionary<string, object?>? GetObject(JsonElement obj, string name)
+    private static Dictionary<string, object?>? GetObject(JsonElement obj, string name)
         => Prop(obj, name) is { ValueKind: JsonValueKind.Object } e ? ToDictionary(e) : null;
 
     private static object? ToValue(JsonElement e) => e.ValueKind switch

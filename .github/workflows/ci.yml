@@ -21,11 +21,13 @@ jobs:
       - name: Restore
         run: dotnet restore
 
-      - name: Build
+      # Build also runs the Roslyn analyzers (latest-recommended); warnings are
+      # errors, so a static-analysis finding fails the build.
+      - name: Build (static analysis)
         run: dotnet build -c Release --no-restore
 
-      - name: Test
-        run: dotnet test -c Release --no-build --verbosity normal
+      - name: Test with coverage gate (>=90% line)
+        run: dotnet test -c Release /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:Threshold=90 /p:ThresholdType=line /p:ThresholdStat=total
 
   conformance:
     name: Conformance suite in sync
@@ -39,3 +41,16 @@ jobs:
           diff -ru "$RUNNER_TEMP/conformance/fixtures"      "tests/BabelQueue.Core.Tests/conformance/fixtures"
           diff -ru "$RUNNER_TEMP/conformance/schema"        "tests/BabelQueue.Core.Tests/conformance/schema"
           echo "Vendored conformance is in sync with the canonical suite."
+
+  ci-green:
+    name: CI green
+    runs-on: ubuntu-latest
+    needs: [test, conformance]
+    if: ${{ always() }}
+    steps:
+      - name: Fail if any required job did not pass
+        run: |
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
+            echo "A required job failed or was cancelled."
+            exit 1
+          fi

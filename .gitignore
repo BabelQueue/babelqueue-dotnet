@@ -4,6 +4,11 @@ obj/
 artifacts/
 [Tt]est[Rr]esults/
 
+# Coverage
+*.cobertura.xml
+coverage*.json
+coverage*.xml
+
 # Packages
 *.nupkg
 *.snupkg
