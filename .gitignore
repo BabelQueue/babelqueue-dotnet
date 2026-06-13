@@ -18,3 +18,6 @@ coverage*.xml
 .vs/
 .idea/
 *.user
+
+# CommitBrief local config and cache
+.commitbrief/
