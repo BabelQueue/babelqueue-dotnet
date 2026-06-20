@@ -100,6 +100,53 @@ future adapter), exactly as with the other SDK cores.
 `UnknownUrnStrategy` (`Fail`, `Delete`, `Release`, `DeadLetter`) is provided for
 adapters to act on.
 
+## OpenTelemetry tracing (optional)
+
+`BabelQueue.Tracing` adds **opt-in** OpenTelemetry tracing built only on the in-box
+`System.Diagnostics.Activity` — the primitive the OpenTelemetry .NET SDK consumes —
+so the core still takes **zero** package dependencies. To export, wire a
+`TracerProvider` that listens to the source `Telemetry.ActivitySourceName`
+(`"BabelQueue"`, e.g. `.AddSource("BabelQueue")`); with no listener the helpers are
+nearly free and emit nothing. The wire envelope is never touched.
+
+Cross-hop propagation works at two layered levels:
+
+- **`trace_id` correlation (v0.1):** `Telemetry.Wrap`/`Telemetry.PublishAsync` map the
+  envelope's `trace_id` to an OTel trace id, so every hop that shares a `trace_id`
+  shares one trace — correlation and per-hop timing.
+- **W3C `traceparent` span linkage (v0.2):** the header-aware overloads carry the
+  active span across a hop as a W3C `traceparent` on an **out-of-band header carrier**
+  that rides *beside* the frozen envelope (never inside it), so the consumer span
+  becomes a true **child** of the producer span. No header ⇒ it falls back to the
+  v0.1 `trace_id` parent — a strict, backward-compatible upgrade.
+
+```csharp
+using BabelQueue.Tracing;
+
+// PRODUCER — inject the active span's traceparent into a carrier the adapter
+// carries on the transport's metadata channel, beside the envelope.
+var headers = new Dictionary<string, string>();
+string id = await Telemetry.PublishAsync(
+    "urn:babel:orders:created",
+    new Dictionary<string, object?> { ["order_id"] = 1042L },
+    headers,                                   // <- the out-of-band carrier
+    env => myTransport.SendAsync(env, headers), // adapter carries `headers`
+    queue: "orders");
+
+// CONSUMER — pass the delivered message's headers; the process span is started
+// as a child of the producer span (or the trace_id parent when absent).
+Handler traced = Telemetry.Wrap(async env => { /* handle */ }, deliveredHeaders);
+await traced(incoming);
+```
+
+> The carrier is `IDictionary<string,string>` to write (producer) /
+> `IReadOnlyDictionary<string,string>` to read (consumer) — the .NET counterpart of
+> the Go `HeaderPublisher`/`ReceivedMessage.Headers` and Node `HeaderCarrier` seams.
+> `Traceparent.Inject` / `Traceparent.RemoteParentFromHeaders` expose the W3C
+> inject/extract directly. **Per-adapter transport wiring** (the .NET transports live
+> in the separate `BabelQueue.Sqs` / `BabelQueue.Redis` / `BabelQueue.MassTransit`
+> packages) is a documented follow-up; this core ships the mechanism.
+
 ## Conformance
 
 This core passes the shared **cross-SDK conformance suite** (vendored under

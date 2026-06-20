@@ -25,9 +25,13 @@ namespace BabelQueue.Tracing;
 /// listener the helpers are nearly free and emit nothing. The wire envelope is untouched (GR-1).
 /// </para>
 /// <para>
-/// Honest limit: every hop that shares a <c>trace_id</c> shares one trace, but exact cross-hop
-/// <i>span</i> parent-child linkage (propagating a W3C <c>traceparent</c> as a transport header)
-/// is a documented follow-up; this maps <c>trace_id</c> to the trace id only.
+/// <c>trace_id</c> correlation keeps every hop that shares a <c>trace_id</c> in one trace. For
+/// exact cross-hop <i>span</i> parent-child linkage — propagating a W3C <c>traceparent</c> as an
+/// out-of-band transport header (ADR-0028, v0.2) — use the header-aware
+/// <see cref="Wrap(Handler, IReadOnlyDictionary{string, string})"/> and
+/// <see cref="PublishAsync{TResult}(string, IReadOnlyDictionary{string, object?}?, IDictionary{string, string}, Func{Envelope, Task{TResult}}, string)"/>
+/// overloads with <see cref="Traceparent"/>; a message produced without a <c>traceparent</c>
+/// header falls back to this <c>trace_id</c> mapping (no regression).
 /// </para>
 /// </remarks>
 public static class Telemetry
@@ -77,15 +81,36 @@ public static class Telemetry
     /// The handler still receives the full <see cref="Envelope"/>; a throw is recorded and re-thrown so
     /// the runtime's retry / dead-letter path still applies.
     /// </summary>
-    public static Handler Wrap(Handler handler) =>
-        async envelope =>
+    public static Handler Wrap(Handler handler) => Wrap(handler, headers: null);
+
+    /// <summary>
+    /// The header-aware (ADR-0028, v0.2) counterpart of <see cref="Wrap(Handler)"/>: starts the
+    /// CONSUMER activity <c>process &lt;urn&gt;</c> as a true <b>child</b> of the producer span
+    /// when the delivered message carried a valid W3C <c>traceparent</c> on
+    /// <paramref name="headers"/> (an out-of-band carrier an adapter surfaces from the transport's
+    /// metadata channel, beside the frozen envelope). When no usable <c>traceparent</c> is present
+    /// it falls back to the v0.1 <c>trace_id</c>-derived parent — so enabling propagation is a
+    /// strict, backward-compatible upgrade.
+    /// </summary>
+    /// <param name="handler">The consume handler to decorate; it still receives the full envelope.</param>
+    /// <param name="headers">
+    /// The delivered message's out-of-band headers, or <c>null</c> when the adapter carries none
+    /// (then behaviour is exactly <see cref="Wrap(Handler)"/>).
+    /// </param>
+    public static Handler Wrap(Handler handler, IReadOnlyDictionary<string, string>? headers)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+
+        return async envelope =>
         {
             string traceId = envelope.TraceId ?? string.Empty;
             string urn = EnvelopeCodec.Urn(envelope);
 
-            ActivityContext parent = traceId.Length == 0
-                ? default
-                : new ActivityContext(TraceIdOf(traceId), SpanIdOf(traceId), ActivityTraceFlags.Recorded, isRemote: true);
+            // ADR-0028: a valid traceparent makes this span a true child of the producer span;
+            // otherwise fall back to the v0.1 trace_id-derived parent (ADR-0025 Option 1).
+            ActivityContext parent =
+                Traceparent.RemoteParentFromHeaders(headers)
+                ?? ParentFromTraceId(traceId);
 
             using Activity? activity = Source.StartActivity($"process {urn}", ActivityKind.Consumer, parent);
             ApplyConsumeTags(activity, envelope, traceId);
@@ -100,15 +125,53 @@ public static class Telemetry
                 throw;
             }
         };
+    }
+
+    /// <summary>
+    /// The remote parent <see cref="ActivityContext"/> derived from the envelope's
+    /// <c>trace_id</c> (ADR-0025 Option 1, v0.1) — a blank <c>trace_id</c> yields the default
+    /// (root) context.
+    /// </summary>
+    private static ActivityContext ParentFromTraceId(string traceId) =>
+        traceId.Length == 0
+            ? default
+            : new ActivityContext(TraceIdOf(traceId), SpanIdOf(traceId), ActivityTraceFlags.Recorded, isRemote: true);
 
     /// <summary>
     /// Runs a publish under a PRODUCER activity <c>publish &lt;urn&gt;</c>, carrying the active trace's
     /// id into the built envelope's <c>trace_id</c> so the downstream consumer recovers the same trace.
     /// <paramref name="send"/> performs the real transport write and its result is returned.
     /// </summary>
+    public static Task<TResult> PublishAsync<TResult>(
+        string urn,
+        IReadOnlyDictionary<string, object?>? data,
+        Func<Envelope, Task<TResult>> send,
+        string queue = "default") =>
+        PublishAsync(urn, data, headers: null, send, queue);
+
+    /// <summary>
+    /// The header-aware (ADR-0028, v0.2) counterpart of
+    /// <see cref="PublishAsync{TResult}(string, IReadOnlyDictionary{string, object?}?, Func{Envelope, Task{TResult}}, string)"/>:
+    /// in addition to stamping the active trace's id into the envelope's <c>trace_id</c> (v0.1),
+    /// it injects the active PRODUCER span's W3C <c>traceparent</c> (and <c>tracestate</c>) into
+    /// <paramref name="headers"/>. An adapter carries that same carrier beside the frozen envelope
+    /// on the transport's metadata channel, so the consumer can start its span as a true
+    /// <b>child</b> of this producer span. The header rides out of band, never in the envelope
+    /// (GR-1); a transport that can't carry headers simply doesn't — no error, no regression.
+    /// </summary>
+    /// <param name="urn">The message URN to publish.</param>
+    /// <param name="data">The message payload, or <c>null</c> for an empty body.</param>
+    /// <param name="headers">
+    /// The out-of-band carrier to receive the producer span's <c>traceparent</c>. When the
+    /// PRODUCER activity has no listener (so no span is recorded), or this is <c>null</c>, the
+    /// carrier is left untouched and only the v0.1 <c>trace_id</c> propagation applies.
+    /// </param>
+    /// <param name="send">Performs the real transport write; its result is returned.</param>
+    /// <param name="queue">The destination queue stamped into <c>meta.queue</c>.</param>
     public static async Task<TResult> PublishAsync<TResult>(
         string urn,
         IReadOnlyDictionary<string, object?>? data,
+        IDictionary<string, string>? headers,
         Func<Envelope, Task<TResult>> send,
         string queue = "default")
     {
@@ -118,6 +181,13 @@ public static class Telemetry
         activity?.SetTag("messaging.system", System);
         activity?.SetTag("messaging.operation", "publish");
         activity?.SetTag("messaging.destination.name", urn);
+
+        // ADR-0028: inject this producer span's traceparent onto the out-of-band carrier (when one
+        // was supplied), beside the frozen envelope, for true cross-hop span linkage.
+        if (headers is not null && activity is not null)
+        {
+            Traceparent.Inject(headers, activity);
+        }
 
         try
         {

@@ -8,6 +8,10 @@ using Xunit;
 
 namespace BabelQueue.Tests;
 
+// Shares the "ActivityListener" collection with TraceparentTests: both register a process-wide
+// ActivitySource listener on the same "BabelQueue" source, so they must not run in parallel or
+// one class's activities leak into the other's captured list.
+[Collection("ActivityListener")]
 public sealed class TelemetryTests : IDisposable
 {
     private const string TraceId = "7b3f9c2a-e41d-4f88-9b2a-1c0d5e6f7a8b";
