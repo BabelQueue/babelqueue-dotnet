@@ -158,6 +158,54 @@ consumer-side mirror, ADR-0022). The core takes **no DB dependency (GR-7)** — 
 for tests / single-process demos and does not claim/lock rows (a production adapter's
 job).
 
+### GDPR field encryption (optional)
+
+A schema registry can mark a `data` field as personal data with the
+`x-gdpr-sensitive` keyword (ADR-0030). `BabelQueue.Gdpr` is the **runtime** half of
+that: a producer encrypts exactly those marked leaves before publish, a consumer
+decrypts them after decode — so PII never crosses the wire in clear, while the
+**envelope stays frozen** (only the marked *values* inside `data` change, into
+ciphertext strings; `meta.schema_version` stays **1**, `trace_id` is untouched, and
+`data` is still pure JSON, so any SDK can carry the message even without the key).
+
+```csharp
+using BabelQueue.Gdpr;
+using BabelQueue.Schema;
+
+// The type and namespace are both `Gdpr`, so alias the type at the call site.
+using GdprFields = BabelQueue.Gdpr.Gdpr;
+
+// The cipher is YOURS — bind it to a KMS / Vault / HSM, or use the in-box reference.
+ICipher cipher = new AesGcmCipher(my32ByteKey);     // AES-256-GCM, your key, no key mgmt
+
+// PRODUCER — validate cleartext, then encrypt the marked leaves in place.
+var schema = provider.SchemaFor("urn:order:placed");          // the per-URN JSON Schema
+SchemaValidation.Validate(provider, "urn:order:placed", data); // cleartext, before Protect
+var env = EnvelopeCodec.Make("urn:order:placed", data, "orders");
+GdprFields.Protect((IDictionary<string, object?>)env.Data!, schema, cipher);
+var body = EnvelopeCodec.Encode(env);                          // ciphertext rides inside data
+
+// CONSUMER — decode, decrypt the marked leaves in place, then handle (and validate cleartext).
+var incoming = EnvelopeCodec.Decode(body);
+GdprFields.Unprotect((IDictionary<string, object?>)incoming.Data!, schema, cipher);
+```
+
+`ICipher` (`string Encrypt(byte[])` / `byte[] Decrypt(string)`) is **caller-provided**,
+so the core takes **no crypto dependency (GR-7)** — only your concrete backend does.
+The bundled `AesGcmCipher` is a reference on the in-box
+`System.Security.Cryptography.AesGcm` (random 12-byte nonce, 16-byte auth tag, base64);
+a wrong key or tampered ciphertext fails authentication and throws.
+
+`Protect` canonically JSON-encodes each marked value before encrypting, and `Unprotect`
+restores it **byte-for-byte** (numbers as `long`/`double`, objects as `Dictionary`).
+An absent marked field is skipped; a non-string leaf in `Unprotect` is left untouched
+(so it is idempotent for already-cleartext non-string values); a value that the cipher
+cannot open throws `ProtectedFieldException`, so the message takes the retry /
+dead-letter path rather than being processed as unreadable PII. **Validate cleartext** —
+before `Protect`, after `Unprotect` — because a schema that constrains a sensitive field
+(`minLength`, `enum`, …) would reject the ciphertext string. The feature is strictly
+opt-in: a producer/consumer that never calls these helpers behaves exactly as before.
+
 ## What this core is (and isn't)
 
 It enforces the **contract**: the envelope shape, URN identity, trace propagation,

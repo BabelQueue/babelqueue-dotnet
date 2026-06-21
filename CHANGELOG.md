@@ -9,6 +9,38 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-21
+
+### Added
+- **Runtime GDPR field encryption (ADR-0030)** — the SDK-enforcement half of the
+  `x-gdpr-sensitive` governance keyword: an opt-in, producer/consumer pair that encrypts
+  exactly the `data` fields a schema declared sensitive, leaving the wire envelope frozen.
+  - New `BabelQueue.Gdpr` namespace: the caller-provided `ICipher` interface
+    (`string Encrypt(byte[])` / `byte[] Decrypt(string)`) — bound to a KMS / Vault / HSM /
+    tokenisation service, so the **core pulls no crypto dependency (GR-7)** — plus a
+    reference `AesGcmCipher` on the in-box `System.Security.Cryptography.AesGcm`
+    (AES-256-GCM, random 12-byte nonce, 16-byte tag, base64; the key is the caller's, no
+    key management). `Gdpr.Protect(data, schema, cipher)` / `Gdpr.Unprotect(...)` are
+    standalone, opt-in helpers, and `ProtectedFieldException` is the typed wrong-key error.
+  - **Sensitive paths come from the schema, not the message.** `SchemaSensitivity.SensitivePaths`
+    extracts every `x-gdpr-sensitive` mark (boolean `true` or a non-empty string category) from a
+    per-URN schema — nested objects (`profile.full_name`) and array items (`addresses[].line`)
+    included. Parsing the keyword is **validation-neutral** (the payload validator ignores it), so
+    annotating a schema is never a breaking change (GR-1).
+  - **The envelope stays frozen (GR-1).** `Protect` rewrites only **values** inside `data`: a marked
+    leaf's value is canonically JSON-encoded (the codec's compact, relaxed-escaping options) and
+    replaced by the cipher's ciphertext **string**. It adds/renames/removes **no** envelope field,
+    `meta.schema_version` stays **1**, `trace_id` is untouched (GR-4), and a ciphertext value is a
+    JSON string so `data` stays **pure JSON** (GR-3) — an SDK without the key still carries the
+    envelope. `Unprotect` is the byte-for-byte inverse (numbers restore to `long`/`double`, objects
+    to `Dictionary`, matching `System.Text.Json`); an absent field is skipped, a non-string leaf is
+    left untouched (idempotent), and a wrong key throws `ProtectedFieldException` so the message
+    takes the retry / dead-letter path.
+  - Strictly opt-in and backward compatible (GR-6). Validate **cleartext** — before `Protect` on
+    the producer and after `Unprotect` on the consumer — because a schema constraining a sensitive
+    field would otherwise reject the ciphertext string. (Note: the type and namespace are both
+    `Gdpr`, so alias the type at the call site, e.g. `using GdprFields = BabelQueue.Gdpr.Gdpr;`.)
+
 ## [1.6.0] - 2026-06-21
 
 ### Added
