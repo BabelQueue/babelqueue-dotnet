@@ -9,6 +9,31 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-06-21
+
+### Added
+- **Replay-bypass — an out-of-band side-effect guard for DLQ replay (ADR-0027).** A
+  deliberate `Redrive.RedriveAsync` re-runs the handler and re-fires its external
+  side-effects (a second charge, a duplicate email); `Idempotency.Wrap` stops an
+  *accidental* duplicate, not the *intended* reprocess. This closes that gap.
+  - New `Redrive.Options(Bypass: true)` stamps a `bq-replay-bypass` **transport
+    header** on each redriven message; `Redrive.Item` gains a `Bypassed` flag. It takes
+    effect only when the transport implements the new optional
+    `Redrive.IHeaderPublisher` (`PublishWithHeadersAsync(queue, body, headers)`) —
+    otherwise `Bypass` is a no-op and the message is still redriven (`Bypassed:
+    false`), exactly like the Go reference.
+  - New `Replay.IsReplay(headers)` + `Replay.BypassExternalEffectsAsync(headers,
+    effect)` consume-side guard (plus the `Replay.HeaderReplayBypass` constant): a
+    handler wraps its external, non-idempotent side so a replay skips it while the
+    idempotent core still runs.
+  - The marker rides **beside** the frozen envelope on the out-of-band header carrier
+    (`IReadOnlyDictionary<string,string>` to read), never inside it (`schema_version`
+    stays **1**, GR-1; `trace_id` preserved, GR-4) — the same seam as the `traceparent`
+    header. **Zero new dependencies (GR-7).** Fully opt-in and backward compatible: a
+    header-less message behaves exactly as before. Per-adapter transport wiring
+    (`BabelQueue.Sqs` / `BabelQueue.Redis` / `BabelQueue.MassTransit`) is the documented
+    follow-up, like ADR-0028's.
+
 ## [1.4.0] - 2026-06-21
 
 ### Added

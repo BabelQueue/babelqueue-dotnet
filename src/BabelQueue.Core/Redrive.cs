@@ -21,10 +21,15 @@ namespace BabelQueue;
 /// frozen (GR-1) and no dependency is added.
 /// </para>
 /// <para>
-/// Safety in v1 is <c>DryRun</c> + sandbox routing (<c>ToQueue</c>) + <c>Select</c>. The
-/// <b>Replay-Bypass</b> guard (a <c>bq-replay-bypass</c> transport header surfaced to handlers so a
-/// replay can skip external side-effects) is a documented phase two — it touches the runtime and
-/// every transport, like the OpenTelemetry <c>traceparent</c> follow-up.
+/// Safety in v1 is <c>DryRun</c> + sandbox routing (<c>ToQueue</c>) + <c>Select</c>. On top of
+/// those, the <b>Replay-Bypass</b> guard (ADR-0027): with <see cref="Options.Bypass"/>, a redriven
+/// message is stamped with the <c>bq-replay-bypass</c> transport header — surfaced to the handler
+/// via <see cref="Replay.IsReplay"/> / <see cref="Replay.BypassExternalEffectsAsync"/> so a replay
+/// can skip external side-effects that already fired. The marker rides the out-of-band header
+/// carrier, never the frozen envelope (GR-1), and takes effect only when the transport implements
+/// the optional <see cref="IHeaderPublisher"/>; otherwise it is a no-op and the per-item
+/// <see cref="Item.Bypassed"/> flag stays <c>false</c>, exactly like the Go reference and the
+/// per-transport rollout of the OpenTelemetry <c>traceparent</c> follow-up.
 /// </para>
 /// </remarks>
 public static class Redrive
@@ -45,16 +50,32 @@ public static class Redrive
         Task AckAsync(Reserved message);
     }
 
+    /// <summary>
+    /// An optional <see cref="ITransport"/> capability: publish a body together with out-of-band
+    /// transport <c>headers</c> (e.g. the <c>bq-replay-bypass</c> marker), for brokers that carry
+    /// per-message metadata. The .NET counterpart of Go's optional <c>HeaderPublisher</c> and Node's
+    /// <c>RedriveIO.publishWithHeaders</c>. A transport that does not implement it simply does not
+    /// propagate headers — <see cref="RedriveAsync"/> falls back to plain
+    /// <see cref="ITransport.PublishAsync"/> and <see cref="Options.Bypass"/> is a no-op (ADR-0027).
+    /// </summary>
+    public interface IHeaderPublisher
+    {
+        /// <summary>Publish <paramref name="body"/> to <paramref name="queue"/> with out-of-band <paramref name="headers"/>.</summary>
+        Task PublishWithHeadersAsync(string queue, string body, IReadOnlyDictionary<string, string> headers);
+    }
+
     /// <summary>Options for a <see cref="RedriveAsync"/> run.</summary>
     /// <param name="ToQueue">Overrides the target queue (sandbox/redirect); when blank, each message goes back to its own <c>dead_letter.original_queue</c>.</param>
     /// <param name="Max">Caps how many messages are pulled from the DLQ (0 = all available).</param>
     /// <param name="DryRun">Inspect and report the plan, restoring every message unchanged.</param>
     /// <param name="Select">Picks which messages to redrive (unselected are restored unchanged).</param>
+    /// <param name="Bypass">Stamps the <c>bq-replay-bypass</c> header on each redriven message (see <see cref="Replay"/>); a no-op unless the transport is an <see cref="IHeaderPublisher"/>.</param>
     public sealed record Options(
         string? ToQueue = null,
         int Max = 0,
         bool DryRun = false,
-        Func<Envelope, bool>? Select = null);
+        Func<Envelope, bool>? Select = null,
+        bool Bypass = false);
 
     /// <summary>What happened to one message during a <see cref="RedriveAsync"/> run.</summary>
     public sealed record Item(
@@ -64,7 +85,8 @@ public static class Redrive
         string? Reason,
         string From,
         string? To,
-        bool Redriven);
+        bool Redriven,
+        bool Bypassed = false);
 
     /// <summary>Summary of a <see cref="RedriveAsync"/> run.</summary>
     public sealed record Result(int Redriven, int Skipped, IReadOnlyList<Item> Items);
@@ -156,9 +178,10 @@ public static class Redrive
 
             var encoded = EnvelopeCodec.Encode(Reset(envelope));
             var published = false;
+            var bypassed = false;
             try
             {
-                await transport.PublishAsync(target, encoded).ConfigureAwait(false);
+                bypassed = await PublishRedrivenAsync(transport, target, encoded, options.Bypass).ConfigureAwait(false);
                 published = true;
             }
             finally
@@ -173,10 +196,32 @@ public static class Redrive
 
             await transport.AckAsync(message).ConfigureAwait(false);
             redriven++;
-            items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, true));
+            items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, true, bypassed));
         }
 
         return new Result(redriven, skipped, items);
+    }
+
+    /// <summary>
+    /// Re-publishes a reset <paramref name="body"/> to <paramref name="queue"/>. When
+    /// <paramref name="bypass"/> is set and the transport is an <see cref="IHeaderPublisher"/>, it
+    /// stamps the <c>bq-replay-bypass</c> header and reports <c>true</c>; otherwise it publishes
+    /// plainly and reports <c>false</c> (ADR-0027).
+    /// </summary>
+    private static async Task<bool> PublishRedrivenAsync(ITransport transport, string queue, string body, bool bypass)
+    {
+        if (bypass && transport is IHeaderPublisher headerPublisher)
+        {
+            var headers = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [Replay.HeaderReplayBypass] = "1",
+            };
+            await headerPublisher.PublishWithHeadersAsync(queue, body, headers).ConfigureAwait(false);
+            return true;
+        }
+
+        await transport.PublishAsync(queue, body).ConfigureAwait(false);
+        return false;
     }
 
     private static string? SourceQueueOf(Envelope envelope)

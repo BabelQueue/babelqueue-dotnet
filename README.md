@@ -90,6 +90,32 @@ var dlq = DeadLetters.Annotate(env, "failed", "orders", attempts: 3, error: "boo
 unchanged inside the dead-lettered message, so any-language consumers can still
 read it.
 
+### Replay-bypass (optional)
+
+A deliberate replay off the DLQ (`Redrive.RedriveAsync`) re-runs the handler,
+re-firing its external side-effects — a second charge, a duplicate email. With
+`Bypass`, redrive stamps a `bq-replay-bypass` **transport header** on each replayed
+message; a handler reads the delivered headers and skips the effects that already
+ran, while the idempotent core still runs (ADR-0027).
+
+```csharp
+// PRODUCER — redrive with bypass (the transport must be an IHeaderPublisher).
+await Redrive.RedriveAsync(transport, "orders.dlq", new Redrive.Options(Bypass: true));
+
+// CONSUMER — the adapter surfaces the delivered message's out-of-band headers.
+await handler(env);                                          // idempotent core — always runs
+await Replay.BypassExternalEffectsAsync(headers, async () => // skipped when Replay.IsReplay(headers)
+{
+    await SendConfirmationEmailAsync(env);
+});
+```
+
+The marker rides **beside** the frozen envelope on the out-of-band header carrier,
+never inside it (`schema_version` stays **1**, GR-1; `trace_id` preserved, GR-4) —
+the same seam as the `traceparent` header. It takes effect only when the transport
+implements `Redrive.IHeaderPublisher`; otherwise `Bypass` is a no-op (`Bypassed:
+false`) and the message is still redriven.
+
 ## What this core is (and isn't)
 
 It enforces the **contract**: the envelope shape, URN identity, trace propagation,
