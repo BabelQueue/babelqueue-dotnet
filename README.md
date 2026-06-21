@@ -116,6 +116,48 @@ the same seam as the `traceparent` header. It takes effect only when the transpo
 implements `Redrive.IHeaderPublisher`; otherwise `Bypass` is a no-op (`Bypassed:
 false`) and the message is still redriven.
 
+### Transactional outbox (optional)
+
+A plain producer does two things that must both happen or neither — commit the
+business row **and** publish the message — across two systems, so a crash between
+them loses or duplicates the message (the *dual write*). The outbox (ADR-0029)
+removes it: the message is stored **into the same database, in the same
+transaction** as the business data, then a separate **relay** publishes the
+durable rows.
+
+```csharp
+using BabelQueue.Outbox;
+
+// WRITE — the caller owns the transaction boundary (this is the whole point).
+var outbox = new Outbox(store);                       // store : IOutboxStore (your DB, ADO.NET)
+await using var tx = await db.BeginTransactionAsync(ct);
+await db.InsertOrderAsync(order, tx, ct);             // the business write
+var env = EnvelopeCodec.Make("urn:order:placed", data, "orders");
+await outbox.WriteAsync(env, ct);                     // same connection, same tx — encodes & saves
+await tx.CommitAsync(ct);                             // both, or neither
+
+// RELAY — drain pending rows and publish them, on a worker loop / scheduler.
+var relay = new OutboxRelay(
+    (body, queue, c) => transport.PublishAsync(queue, body),   // your publish seam (verbatim body)
+    store);
+await relay.DrainAsync(cancellationToken: ct);        // FlushAsync() does one batch
+```
+
+`Outbox.WriteAsync` encodes via the frozen codec and delegates to
+`IOutboxStore.SaveAsync` — it **never begins or commits** anything, so it composes
+with your existing unit-of-work. The relay publishes the **stored bytes verbatim**
+(never decodes/rebuilds the envelope), so `schema_version` stays **1** (GR-1/GR-5)
+and `trace_id` is preserved end-to-end (GR-4). A publish that throws marks the row
+failed and leaves it pending — one poison row never blocks the batch — with a
+bounded, capped backoff; `DrainAsync` loops until no progress is made.
+
+This is **exactly-once handoff**, not exactly-once delivery: after a crash the relay
+re-publishes a row, so consumers must stay idempotent (`Idempotency.Wrap` is the
+consumer-side mirror, ADR-0022). The core takes **no DB dependency (GR-7)** — bind
+`IOutboxStore` to your own table over ADO.NET; the bundled `InMemoryOutboxStore` is
+for tests / single-process demos and does not claim/lock rows (a production adapter's
+job).
+
 ## What this core is (and isn't)
 
 It enforces the **contract**: the envelope shape, URN identity, trace propagation,

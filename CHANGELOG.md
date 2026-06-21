@@ -9,6 +9,36 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-21
+
+### Added
+- **Transactional outbox helper (ADR-0029)** — an opt-in, producer-side fix for the
+  *dual write*: persist the message **into the same database, in the same transaction**
+  as the business data (so it commits or rolls back atomically with it), then a separate
+  relay publishes the durable rows. No distributed transaction; exactly-once *handoff*
+  into the broker, at-least-once on the wire as always.
+  - New `BabelQueue.Outbox` namespace: `IOutboxStore` (the DB-agnostic persistence
+    contract — `SaveAsync` / `FetchUnpublishedAsync` / `MarkPublishedAsync` /
+    `MarkFailedAsync`, all async + `CancellationToken`), the `Outbox` writer
+    (`WriteAsync(envelope, ct)`), `OutboxRelay` (`FlushAsync` / `DrainAsync`) over an
+    injectable `OutboxPublisher` publish seam, the `OutboxRecord` / `OutboxRelayResult`
+    records and a reference `InMemoryOutboxStore`.
+  - **The caller owns the transaction boundary.** `Outbox.WriteAsync` encodes via the
+    frozen codec and calls `IOutboxStore.SaveAsync` *inside the transaction the caller
+    already opened* — it never begins/commits anything. The store binds to the caller's
+    own DB over ADO.NET, so the core takes **zero new dependencies (GR-7)**.
+  - **The relay publishes the stored bytes verbatim** — it never decodes, rebuilds or
+    re-encodes the envelope, so the body that reaches the broker is byte-identical to
+    what was stored (`schema_version` stays **1**, GR-1/GR-5; `trace_id` preserved, GR-4).
+    A throwing publish marks the row failed and leaves it pending (one poison row never
+    blocks the batch), with a bounded, linearly-growing, capped backoff (injectable async
+    delay so tests stay instant). `DrainAsync` loops until a pass makes no progress, with
+    a hard safety ceiling.
+  - Fully opt-in and backward compatible (GR-6); a production deployment binds
+    `IOutboxStore` to a real DB table, the in-memory store is for tests / single-process
+    demos. Per the ADR, relay claim/lock (so two relays don't double-publish a row) is
+    the adapter's concern; the in-memory reference does not implement it.
+
 ## [1.5.0] - 2026-06-21
 
 ### Added
