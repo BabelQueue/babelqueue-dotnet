@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace BabelQueue;
 
@@ -10,8 +12,10 @@ namespace BabelQueue;
 /// <remarks>
 /// Build one with <see cref="EnvelopeCodec.Make"/>, render it with
 /// <see cref="EnvelopeCodec.Encode"/>, and parse inbound bytes with
-/// <see cref="EnvelopeCodec.Decode"/>. The record is immutable; use a
-/// <c>with</c> expression (or <see cref="DeadLetters.Annotate"/>) to derive copies.
+/// <see cref="EnvelopeCodec.Decode(string)"/>. The record is immutable; use a
+/// <c>with</c> expression (or <see cref="DeadLetters.Annotate"/>) to derive copies;
+/// a <c>with</c> copy carries <see cref="Extras"/> along, so unknown keys survive
+/// every re-emit (retry, dead-letter, redrive, outbox relay).
 /// </remarks>
 /// <param name="Job">The message URN (never a class name).</param>
 /// <param name="TraceId">Correlation id, preserved across every hop.</param>
@@ -25,4 +29,20 @@ public sealed record Envelope(
     IReadOnlyDictionary<string, object?>? Data,
     Meta? Meta,
     int Attempts,
-    DeadLetter? DeadLetter);
+    DeadLetter? DeadLetter)
+{
+    /// <summary>
+    /// Unknown top-level keys captured by <see cref="EnvelopeCodec.Decode(string)"/>,
+    /// keyed by name and kept as raw JSON. <see cref="EnvelopeCodec.Encode"/> writes
+    /// them back after the canonical fields, so a decode → re-encode never drops a
+    /// forward-compatible extension. Never holds a canonical or forbidden key.
+    /// <c>null</c> when the message carried none.
+    /// <para>
+    /// Treat as read-only: a <c>with</c> copy shares this dictionary with the original, so
+    /// mutating it in place changes both. To change extras, assign a new dictionary
+    /// (<c>env with { Extras = new(env.Extras!) { ["k"] = v } }</c>).
+    /// </para>
+    /// </summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extras { get; init; }
+}

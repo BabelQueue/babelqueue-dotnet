@@ -94,6 +94,16 @@ public static class PayloadValidator
         return null;
     }
 
+    private static int CodePointLength(string value)
+    {
+        var count = 0;
+        foreach (var _ in value.EnumerateRunes())
+        {
+            count++;
+        }
+        return count;
+    }
+
     private static string? CheckArray(IReadOnlyDictionary<string, object?> schema, object? value, string path)
     {
         if (value is not IReadOnlyList<object?> list)
@@ -125,7 +135,9 @@ public static class PayloadValidator
             return Violation(path, "not_a_string");
         }
 
-        if (schema.TryGetValue("minLength", out var ml) && ml is long min && str.Length < min)
+        // minLength counts Unicode code points (JSON Schema / ECMA-262), not UTF-16 units:
+        // "çğü" is 3, an astral emoji is 1 — matching the other SDK validators.
+        if (schema.TryGetValue("minLength", out var ml) && ml is long min && CodePointLength(str) < min)
         {
             return Violation(path, "below_min_length");
         }

@@ -9,6 +9,32 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-01
+
+MINOR: adds public API (`Envelope.Extras`, `Meta.Extras`, `EnvelopeCodec.Decode(string, Action<string>?)`)
+and changes re-emit behaviour (unknown keys are now preserved); no existing signature changed.
+
+### Fixed
+- **Unknown keys survive re-emit (forward compatibility, GR-5).** `Envelope` and `Meta` gain
+  an init-only `[JsonExtensionData] Extras` (`Dictionary<string, JsonElement>?`, `null` when
+  there are none). `EnvelopeCodec.Decode` captures every non-canonical top-level and `meta`
+  key verbatim (raw JSON — `1.0` stays `1.0`, objects stay objects) and `Encode` writes them
+  after the canonical fields, which keep their order. Every re-emit path carries them:
+  retry (`with { Attempts = … }`), `DeadLetters.Annotate`, `Redrive.Reset` and the outbox.
+  Previously such keys were silently dropped. Treat `Extras` as read-only: a `with` copy
+  shares the dictionary with the original — assign a new dictionary to change it.
+- **Forbidden keys (K-15).** `timestamp`, `meta.max_retries`, `meta.attempts`, `meta.source`
+  and `meta.ts` are no longer accepted silently: decode still succeeds, but each one raises a
+  warning naming its JSON pointer (e.g. `/meta/max_retries`) and is dropped — never captured
+  as an extra, never re-emitted. New overload `EnvelopeCodec.Decode(string, Action<string>?)`
+  receives the warnings; `Decode(string)` writes them to `System.Diagnostics.Trace`.
+- **`minLength` counts Unicode code points** (`string.EnumerateRunes()`), not UTF-16 code
+  units — an astral emoji is 1, matching the other SDK validators (ADR-0024).
+
+### Tests
+- The conformance runner now executes the `roundtrip`, `data_shape`, `forbidden_keys` and
+  `payload_schema_unicode` manifest sections (none skipped); a list-typed `data` is rejected.
+
 ## [1.7.0] - 2026-06-21
 
 ### Added
@@ -164,6 +190,7 @@ following the deprecation policy. The wire envelope is unchanged
 - Pre-1.0: the public API may change before the `1.0.0` tag.
 - **Zero runtime dependencies** (in-box `System.Text.Json`); targets **.NET 8**.
 
-[Unreleased]: https://github.com/BabelQueue/babelqueue-dotnet/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/BabelQueue/babelqueue-dotnet/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/BabelQueue/babelqueue-dotnet/compare/v1.7.0...v1.8.0
 [1.0.0]: https://github.com/BabelQueue/babelqueue-dotnet/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/BabelQueue/babelqueue-dotnet/releases/tag/v0.1.0

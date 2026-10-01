@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
@@ -20,6 +21,30 @@ public static class EnvelopeCodec
 
     /// <summary>The value stamped into <c>meta.lang</c> for envelopes produced here.</summary>
     public const string SourceLang = "dotnet";
+
+    // Canonical keys: decoded into typed fields, never captured as extras. `urn` is the
+    // inbound alias of `job` (resolved on decode, never re-emitted).
+    private static readonly HashSet<string> KnownRootKeys = new(StringComparer.Ordinal)
+    {
+        "job", "trace_id", "data", "meta", "attempts", "dead_letter", "urn",
+    };
+
+    private static readonly HashSet<string> KnownMetaKeys = new(StringComparer.Ordinal)
+    {
+        "id", "queue", "lang", "schema_version", "created_at",
+    };
+
+    // Non-canonical keys (message-envelope.md §10). Policy K-15: decode warns and drops
+    // them (never captured as extras), encode never emits them.
+    private static readonly HashSet<string> ForbiddenRootKeys = new(StringComparer.Ordinal)
+    {
+        "timestamp",
+    };
+
+    private static readonly HashSet<string> ForbiddenMetaKeys = new(StringComparer.Ordinal)
+    {
+        "max_retries", "attempts", "source", "ts",
+    };
 
     // Relaxed encoder => slashes, non-ASCII and HTML chars stay literal (only ", \
     // and control characters are escaped), matching the other SDK cores.
@@ -83,7 +108,10 @@ public static class EnvelopeCodec
 
     /// <summary>
     /// Encodes the envelope as compact UTF-8 JSON. Slashes and non-ASCII are left
-    /// unescaped, matching the other SDK cores; the field order is canonical.
+    /// unescaped, matching the other SDK cores; the field order is canonical. Unknown
+    /// keys carried in <see cref="Meta.Extras"/> / <see cref="Envelope.Extras"/> are
+    /// written after the canonical fields (in their captured order); canonical names
+    /// and the forbidden keys of message-envelope.md §10 are never emitted from extras.
     /// </summary>
     public static string Encode(Envelope envelope)
     {
@@ -96,6 +124,7 @@ public static class EnvelopeCodec
             ["schema_version"] = meta?.SchemaVersion ?? 0,
             ["created_at"] = meta?.CreatedAt ?? 0L,
         };
+        AppendExtras(metaMap, meta?.Extras, KnownMetaKeys, ForbiddenMetaKeys);
 
         var root = new Dictionary<string, object?>
         {
@@ -120,6 +149,8 @@ public static class EnvelopeCodec
             };
         }
 
+        AppendExtras(root, envelope.Extras, KnownRootKeys, ForbiddenRootKeys);
+
         return JsonSerializer.Serialize(root, EncodeOptions);
     }
 
@@ -129,8 +160,27 @@ public static class EnvelopeCodec
     /// the <c>urn</c> inbound alias is resolved into <c>job</c>. Does not validate the
     /// contents — call <see cref="Accepts"/> first.
     /// </summary>
-    public static Envelope Decode(string raw)
+    /// <remarks>
+    /// Unknown top-level and <c>meta</c> keys are kept in <see cref="Envelope.Extras"/> /
+    /// <see cref="Meta.Extras"/> so a re-encode preserves them. A forbidden key
+    /// (message-envelope.md §10) is dropped with a warning written to
+    /// <see cref="Trace"/>; use <see cref="Decode(string, Action{string}?)"/> to observe
+    /// warnings directly.
+    /// </remarks>
+    public static Envelope Decode(string raw) => Decode(raw, null);
+
+    /// <summary>
+    /// Parses a raw JSON body like <see cref="Decode(string)"/>, reporting each
+    /// warning (a forbidden key from message-envelope.md §10, named by its JSON
+    /// pointer such as <c>/meta/max_retries</c>) to <paramref name="onWarning"/>.
+    /// When <paramref name="onWarning"/> is <c>null</c>, warnings go to
+    /// <see cref="Trace.TraceWarning(string)"/>. Forbidden keys are dropped — never
+    /// captured as extras — so they are never re-emitted.
+    /// </summary>
+    public static Envelope Decode(string raw, Action<string>? onWarning)
     {
+        var warn = onWarning ?? (static message => Trace.TraceWarning(message));
+
         JsonElement root;
         try
         {
@@ -161,12 +211,15 @@ public static class EnvelopeCodec
             job,
             GetString(root, "trace_id"),
             GetObject(root, "data"),
-            ParseMeta(root),
+            ParseMeta(root, warn),
             GetInt(root, "attempts", 0),
-            ParseDeadLetter(root));
+            ParseDeadLetter(root))
+        {
+            Extras = CaptureExtras(root, KnownRootKeys, ForbiddenRootKeys, "/", warn),
+        };
     }
 
-    /// <summary>The message URN — the canonical <c>job</c>, with the <c>urn</c> alias resolved by <see cref="Decode"/>.</summary>
+    /// <summary>The message URN — the canonical <c>job</c>, with the <c>urn</c> alias resolved by <see cref="Decode(string)"/>.</summary>
     public static string Urn(Envelope envelope) => envelope.Job?.Trim() ?? string.Empty;
 
     /// <summary>
@@ -193,7 +246,7 @@ public static class EnvelopeCodec
 
     private static Envelope Empty() => new(null, null, null, null, 0, null);
 
-    private static Meta? ParseMeta(JsonElement root)
+    private static Meta? ParseMeta(JsonElement root, Action<string> warn)
     {
         if (Prop(root, "meta") is not { ValueKind: JsonValueKind.Object } m)
         {
@@ -204,7 +257,69 @@ public static class EnvelopeCodec
             GetString(m, "queue"),
             GetString(m, "lang"),
             GetInt(m, "schema_version", 0),
-            GetLong(m, "created_at", 0L));
+            GetLong(m, "created_at", 0L))
+        {
+            Extras = CaptureExtras(m, KnownMetaKeys, ForbiddenMetaKeys, "/meta/", warn),
+        };
+    }
+
+    /// <summary>
+    /// Collects every non-canonical key of <paramref name="obj"/> as raw JSON, in
+    /// document order. A forbidden key is reported (by JSON pointer) and dropped.
+    /// Returns <c>null</c> when nothing is left to carry.
+    /// </summary>
+    private static Dictionary<string, JsonElement>? CaptureExtras(
+        JsonElement obj,
+        HashSet<string> known,
+        HashSet<string> forbidden,
+        string pointerPrefix,
+        Action<string> warn)
+    {
+        Dictionary<string, JsonElement>? extras = null;
+        foreach (var property in obj.EnumerateObject())
+        {
+            if (known.Contains(property.Name))
+            {
+                continue;
+            }
+            if (forbidden.Contains(property.Name))
+            {
+                warn($"BabelQueue: dropped forbidden envelope key '{pointerPrefix}{property.Name}' "
+                    + "(non-canonical, message-envelope.md §10); it is ignored and never re-emitted.");
+                continue;
+            }
+            extras ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            extras[property.Name] = property.Value;
+        }
+        return extras;
+    }
+
+    /// <summary>
+    /// Appends carried extras after the canonical fields already in <paramref name="target"/>,
+    /// skipping canonical names (the typed field always wins), forbidden keys and
+    /// undefined elements.
+    /// </summary>
+    private static void AppendExtras(
+        Dictionary<string, object?> target,
+        Dictionary<string, JsonElement>? extras,
+        HashSet<string> known,
+        HashSet<string> forbidden)
+    {
+        if (extras is null)
+        {
+            return;
+        }
+        foreach (var (key, value) in extras)
+        {
+            if (known.Contains(key)
+                || forbidden.Contains(key)
+                || target.ContainsKey(key)
+                || value.ValueKind == JsonValueKind.Undefined)
+            {
+                continue;
+            }
+            target[key] = value;
+        }
     }
 
     private static DeadLetter? ParseDeadLetter(JsonElement root)

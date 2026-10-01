@@ -1,3 +1,7 @@
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace BabelQueue;
 
 /// <summary>The immutable per-message metadata block of an <see cref="Envelope"/>.</summary>
@@ -11,4 +15,18 @@ public sealed record Meta(
     string? Queue,
     string? Lang,
     int SchemaVersion,
-    long CreatedAt);
+    long CreatedAt)
+{
+    /// <summary>
+    /// Unknown <c>meta</c> keys captured by <see cref="EnvelopeCodec.Decode(string)"/>,
+    /// kept as raw JSON and re-emitted by <see cref="EnvelopeCodec.Encode"/> after the
+    /// canonical meta fields. Never holds a canonical or forbidden key. <c>null</c>
+    /// when the message carried none.
+    /// <para>
+    /// Treat as read-only: a <c>with</c> copy shares this dictionary with the original, so
+    /// mutating it in place changes both — assign a new dictionary instead.
+    /// </para>
+    /// </summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extras { get; init; }
+}
