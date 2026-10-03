@@ -9,7 +9,7 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
-## [1.8.0] - 2026-10-01
+## [1.8.0] - 2026-10-03
 
 MINOR: adds public API (`Envelope.Extras`, `Meta.Extras`, `EnvelopeCodec.Decode(string, Action<string>?)`)
 and changes re-emit behaviour (unknown keys are now preserved); no existing signature changed.
