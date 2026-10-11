@@ -31,6 +31,12 @@ namespace BabelQueue;
 /// <see cref="Item.Bypassed"/> flag stays <c>false</c>, exactly like the Go reference and the
 /// per-transport rollout of the OpenTelemetry <c>traceparent</c> follow-up.
 /// </para>
+/// <para>
+/// A transport that implements the optional <see cref="IKeyedRepublisher"/> (Kafka: the record
+/// key, contract §6.5) is handed the reserved DLQ message for every re-publish — the redrive
+/// write and the restore write back to the DLQ — so broker-native per-message metadata is carried
+/// over; any other transport gets a plain publish.
+/// </para>
 /// </remarks>
 public static class Redrive
 {
@@ -62,6 +68,25 @@ public static class Redrive
     {
         /// <summary>Publish <paramref name="body"/> to <paramref name="queue"/> with out-of-band <paramref name="headers"/>.</summary>
         Task PublishWithHeadersAsync(string queue, string body, IReadOnlyDictionary<string, string> headers);
+    }
+
+    /// <summary>
+    /// An optional <see cref="ITransport"/> capability: re-publish a body on behalf of a message the
+    /// transport itself reserved, carrying whatever native per-message metadata the broker attaches
+    /// that plain <see cref="ITransport.PublishAsync"/> cannot express — for Kafka, the record key
+    /// (contract §6.5). The .NET counterpart of Go's optional <c>KeyedRepublisher</c>.
+    /// <see cref="RedriveAsync"/> uses it for both the write to the work topic and the restore write
+    /// back to the DLQ; a transport that does not implement it gets a plain
+    /// <see cref="ITransport.PublishAsync"/>. With <see cref="Options.Bypass"/> set, an
+    /// <see cref="IHeaderPublisher"/> still takes precedence for the redrive write.
+    /// </summary>
+    public interface IKeyedRepublisher
+    {
+        /// <summary>
+        /// Publish <paramref name="body"/> to <paramref name="queue"/> on behalf of <paramref name="from"/>,
+        /// the reserved DLQ message the re-publish stands in for (never null).
+        /// </summary>
+        Task PublishFromAsync(string queue, string body, Reserved from);
     }
 
     /// <summary>Options for a <see cref="RedriveAsync"/> run.</summary>
@@ -137,7 +162,7 @@ public static class Redrive
             var envelope = EnvelopeCodec.Decode(message.Body);
             if (string.IsNullOrWhiteSpace(envelope.Job))
             {
-                await transport.PublishAsync(dlq, message.Body).ConfigureAwait(false);
+                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
                 await transport.AckAsync(message).ConfigureAwait(false);
                 skipped++;
                 items.Add(new Item(null, null, null, null, dlq, null, false));
@@ -149,7 +174,7 @@ public static class Redrive
 
             if (options.Select is not null && !options.Select(envelope))
             {
-                await transport.PublishAsync(dlq, message.Body).ConfigureAwait(false);
+                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
                 await transport.AckAsync(message).ConfigureAwait(false);
                 skipped++;
                 items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, null, false));
@@ -160,7 +185,7 @@ public static class Redrive
             if (string.IsNullOrWhiteSpace(target))
             {
                 // no source/sandbox queue to send it to — leave it on the DLQ
-                await transport.PublishAsync(dlq, message.Body).ConfigureAwait(false);
+                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
                 await transport.AckAsync(message).ConfigureAwait(false);
                 skipped++;
                 items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, null, false));
@@ -169,7 +194,7 @@ public static class Redrive
 
             if (options.DryRun)
             {
-                await transport.PublishAsync(dlq, message.Body).ConfigureAwait(false);
+                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
                 await transport.AckAsync(message).ConfigureAwait(false);
                 skipped++;
                 items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, false));
@@ -181,7 +206,7 @@ public static class Redrive
             var bypassed = false;
             try
             {
-                bypassed = await PublishRedrivenAsync(transport, target, encoded, options.Bypass).ConfigureAwait(false);
+                bypassed = await PublishRedrivenAsync(transport, target, encoded, options.Bypass, message).ConfigureAwait(false);
                 published = true;
             }
             finally
@@ -189,7 +214,7 @@ public static class Redrive
                 if (!published)
                 {
                     // restore the original to the DLQ before the error propagates
-                    await transport.PublishAsync(dlq, message.Body).ConfigureAwait(false);
+                    await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
                     await transport.AckAsync(message).ConfigureAwait(false);
                 }
             }
@@ -206,9 +231,10 @@ public static class Redrive
     /// Re-publishes a reset <paramref name="body"/> to <paramref name="queue"/>. When
     /// <paramref name="bypass"/> is set and the transport is an <see cref="IHeaderPublisher"/>, it
     /// stamps the <c>bq-replay-bypass</c> header and reports <c>true</c>; otherwise it publishes
-    /// plainly and reports <c>false</c> (ADR-0027).
+    /// through <see cref="RepublishAsync"/> and reports <c>false</c> (ADR-0027).
     /// </summary>
-    private static async Task<bool> PublishRedrivenAsync(ITransport transport, string queue, string body, bool bypass)
+    private static async Task<bool> PublishRedrivenAsync(
+        ITransport transport, string queue, string body, bool bypass, Reserved from)
     {
         if (bypass && transport is IHeaderPublisher headerPublisher)
         {
@@ -220,9 +246,18 @@ public static class Redrive
             return true;
         }
 
-        await transport.PublishAsync(queue, body).ConfigureAwait(false);
+        await RepublishAsync(transport, queue, body, from).ConfigureAwait(false);
         return false;
     }
+
+    /// <summary>
+    /// Re-publishes on behalf of <paramref name="from"/>: through <see cref="IKeyedRepublisher"/>
+    /// when the transport offers it, otherwise a plain <see cref="ITransport.PublishAsync"/>.
+    /// </summary>
+    private static Task RepublishAsync(ITransport transport, string queue, string body, Reserved from) =>
+        transport is IKeyedRepublisher keyed
+            ? keyed.PublishFromAsync(queue, body, from)
+            : transport.PublishAsync(queue, body);
 
     private static string? SourceQueueOf(Envelope envelope)
     {

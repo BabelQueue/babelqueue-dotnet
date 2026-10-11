@@ -9,6 +9,12 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Added
+- `Redrive.IKeyedRepublisher`: optional `Redrive.ITransport` capability so a DLQ redrive carries
+  broker-native per-message metadata (the Kafka record key, contract §6.5) byte-for-byte on both the
+  redrive write and the restore write back to the DLQ. Transports that do not implement it are
+  unchanged (plain `PublishAsync`). Additive — MINOR.
+
 ## [1.8.0] - 2026-10-03
 
 MINOR: adds public API (`Envelope.Extras`, `Meta.Extras`, `EnvelopeCodec.Decode(string, Action<string>?)`)
