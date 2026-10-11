@@ -9,6 +9,19 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Added
+- `Redrive.IRewinder`: optional `Redrive.ITransport` capability (the counterpart of Go's `Rewinder`).
+  `RedriveAsync` calls `RewindAsync` exactly once whenever an exception ends a run early — a failed
+  restore write back to the DLQ, a failed redrive publish (whether or not its restore succeeded), a
+  failed acknowledgement/commit, or a throwing `Select` callback — so the rest of the drained batch
+  (popped, never processed) is redelivered and a later cumulative commit (Kafka) cannot move the
+  group past it. The message passed is the one being handled; an implementation must rewind to what
+  is not yet committed, never past it. The original error is rethrown; if the rewind fails too, both
+  are reported together as a flat `AggregateException` (a failed redrive publish whose restore also
+  fails is reported in the same aggregate). A failed restore write never acknowledges the DLQ message
+  and no longer masks the original error. Transports that do not implement `IRewinder` are
+  unchanged. Additive — MINOR.
+
 ## [1.9.0] - 2026-10-11
 
 ### Added

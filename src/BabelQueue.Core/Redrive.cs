@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace BabelQueue;
@@ -36,6 +37,15 @@ namespace BabelQueue;
 /// key, contract §6.5) is handed the reserved DLQ message for every re-publish — the redrive
 /// write and the restore write back to the DLQ — so broker-native per-message metadata is carried
 /// over; any other transport gets a plain publish.
+/// </para>
+/// <para>
+/// When a restore write back to the DLQ fails, the message stays unacknowledged. A transport that
+/// implements the optional <see cref="IRewinder"/> (Kafka: a commit is cumulative, so a later
+/// commit would otherwise move the group past the unrestored record) is also asked to hand the
+/// message back to the broker; if that fails too, both errors surface together. The same happens
+/// whenever a run ends early for any other reason (a failed redrive write whose restore succeeded,
+/// a failed acknowledgement/commit, a throwing <c>Select</c> callback): the rest of the drained
+/// batch was popped but never processed, so it is handed back once, at the end of the run.
 /// </para>
 /// </remarks>
 public static class Redrive
@@ -89,6 +99,27 @@ public static class Redrive
         Task PublishFromAsync(string queue, string body, Reserved from);
     }
 
+    /// <summary>
+    /// An optional <see cref="ITransport"/> capability: hand an unacknowledged reserved message back
+    /// to the broker so it is redelivered, and make sure nothing acknowledged afterwards can move
+    /// past it. The .NET counterpart of Go's optional <c>Rewinder</c>. <see cref="RedriveAsync"/>
+    /// calls it when a restore write back to the DLQ fails: for an offset-committing broker (Kafka,
+    /// where a commit is cumulative) it rewinds the consumer to the message's offset, for a
+    /// lock-based broker it releases the lock. It must never delete or acknowledge the message, nor
+    /// alter its body. A transport whose unacknowledged messages already come back on their own
+    /// need not implement it. <see cref="RedriveAsync"/> calls it once when a run ends early
+    /// (a failed restore, a failed redrive write whose restore succeeded, a failed commit, a
+    /// throwing <c>Select</c> callback): the message passed may then already be restored and
+    /// acknowledged, and the call stands for the rest of the drained batch. An implementation
+    /// must rewind to what is not yet committed and never past it, so an acknowledged message is
+    /// not redelivered.
+    /// </summary>
+    public interface IRewinder
+    {
+        /// <summary>Hand the unacknowledged reserved <paramref name="message"/> back to the broker.</summary>
+        Task RewindAsync(Reserved message);
+    }
+
     /// <summary>Options for a <see cref="RedriveAsync"/> run.</summary>
     /// <param name="ToQueue">Overrides the target queue (sandbox/redirect); when blank, each message goes back to its own <c>dead_letter.original_queue</c>.</param>
     /// <param name="Max">Caps how many messages are pulled from the DLQ (0 = all available).</param>
@@ -131,8 +162,9 @@ public static class Redrive
     /// its source queue or <c>options.ToQueue</c>. Messages are drained first and then processed,
     /// so restored messages (skipped, dry-run, or undecodable) are not re-encountered; a DLQ
     /// message is acknowledged only after a successful re-publish, and an undecodable body is
-    /// restored rather than dropped. On a publish failure the message is restored to the DLQ
-    /// before the error propagates.
+    /// restored rather than dropped. On a publish failure the message is restored to the DLQ before
+    /// the error propagates. Whatever ends the run early, an <see cref="IRewinder"/> transport is
+    /// rewound once for the rest of the batch.
     /// </summary>
     public static async Task<Result> RedriveAsync(ITransport transport, string dlq, Options options)
     {
@@ -154,77 +186,119 @@ public static class Redrive
         var redriven = 0;
         var skipped = 0;
         var items = new List<Item>(batch.Count);
+        var current = batch.Count > 0 ? batch[0] : null;
 
-        foreach (var message in batch)
+        try
         {
-            // Decode never throws — a malformed/non-object body yields an empty envelope
-            // (a null Job), which is not redrivable; restore it rather than drop it.
-            var envelope = EnvelopeCodec.Decode(message.Body);
-            if (string.IsNullOrWhiteSpace(envelope.Job))
+            foreach (var message in batch)
             {
-                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
+                current = message;
+
+                // Decode never throws — a malformed/non-object body yields an empty envelope
+                // (a null Job), which is not redrivable; restore it rather than drop it.
+                var envelope = EnvelopeCodec.Decode(message.Body);
+                if (string.IsNullOrWhiteSpace(envelope.Job))
+                {
+                    await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
+                    skipped++;
+                    items.Add(new Item(null, null, null, null, dlq, null, false));
+                    continue;
+                }
+
+                var reason = envelope.DeadLetter?.Reason;
+                var messageId = envelope.Meta?.Id;
+
+                if (options.Select is not null && !options.Select(envelope))
+                {
+                    await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
+                    skipped++;
+                    items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, null, false));
+                    continue;
+                }
+
+                var target = !string.IsNullOrWhiteSpace(options.ToQueue) ? options.ToQueue : SourceQueueOf(envelope);
+                if (string.IsNullOrWhiteSpace(target))
+                {
+                    // no source/sandbox queue to send it to — leave it on the DLQ
+                    await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
+                    skipped++;
+                    items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, null, false));
+                    continue;
+                }
+
+                if (options.DryRun)
+                {
+                    await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
+                    skipped++;
+                    items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, false));
+                    continue;
+                }
+
+                var encoded = EnvelopeCodec.Encode(Reset(envelope));
+                bool bypassed;
+                try
+                {
+                    bypassed = await PublishRedrivenAsync(transport, target, encoded, options.Bypass, message).ConfigureAwait(false);
+                }
+                catch (Exception publishError)
+                {
+                    // restore the original to the DLQ before the error propagates; if the restore
+                    // fails too, surface both (the message is not acknowledged; the run-level handler
+                    // below hands the transport back to the broker)
+                    try
+                    {
+                        await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
+                    }
+                    catch (Exception restoreError)
+                    {
+                        throw new AggregateException(publishError, restoreError);
+                    }
+
+                    throw;
+                }
+
                 await transport.AckAsync(message).ConfigureAwait(false);
-                skipped++;
-                items.Add(new Item(null, null, null, null, dlq, null, false));
-                continue;
+                redriven++;
+                items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, true, bypassed));
             }
 
-            var reason = envelope.DeadLetter?.Reason;
-            var messageId = envelope.Meta?.Id;
-
-            if (options.Select is not null && !options.Select(envelope))
-            {
-                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
-                await transport.AckAsync(message).ConfigureAwait(false);
-                skipped++;
-                items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, null, false));
-                continue;
-            }
-
-            var target = !string.IsNullOrWhiteSpace(options.ToQueue) ? options.ToQueue : SourceQueueOf(envelope);
-            if (string.IsNullOrWhiteSpace(target))
-            {
-                // no source/sandbox queue to send it to — leave it on the DLQ
-                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
-                await transport.AckAsync(message).ConfigureAwait(false);
-                skipped++;
-                items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, null, false));
-                continue;
-            }
-
-            if (options.DryRun)
-            {
-                await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
-                await transport.AckAsync(message).ConfigureAwait(false);
-                skipped++;
-                items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, false));
-                continue;
-            }
-
-            var encoded = EnvelopeCodec.Encode(Reset(envelope));
-            var published = false;
-            var bypassed = false;
+        }
+        catch (Exception error) when (transport is IRewinder && current is not null)
+        {
+            // Whatever ended the run (a failed restore or commit, a publish failure, a throwing
+            // Select callback), the rest of the drained batch was popped but never processed or
+            // acknowledged: hand it back to the broker once, otherwise a later cumulative commit
+            // by the same consumer could skip those records. Records already acknowledged are not
+            // rewound (the transport tracks only the unsettled ones).
             try
             {
-                bypassed = await PublishRedrivenAsync(transport, target, encoded, options.Bypass, message).ConfigureAwait(false);
-                published = true;
+                await ((IRewinder)transport).RewindAsync(current).ConfigureAwait(false);
             }
-            finally
+            catch (Exception rewindError)
             {
-                if (!published)
-                {
-                    // restore the original to the DLQ before the error propagates
-                    await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
-                    await transport.AckAsync(message).ConfigureAwait(false);
-                }
+                // keep the report flat: a publish+restore failure is already an aggregate, so the
+                // rewind error joins it instead of nesting it one level down
+                throw error is AggregateException combined
+                    ? new AggregateException(combined.InnerExceptions.Append(rewindError))
+                    : new AggregateException(error, rewindError);
             }
 
-            await transport.AckAsync(message).ConfigureAwait(false);
-            redriven++;
-            items.Add(new Item(messageId, envelope.TraceId, envelope.Job, reason, dlq, target, true, bypassed));
+            throw;
         }
 
         return new Result(redriven, skipped, items);
+    }
+
+    /// <summary>
+    /// Writes the reserved DLQ <paramref name="message"/> back to <paramref name="dlq"/> unchanged
+    /// and acknowledges it only when that write succeeded. A failed write leaves the message
+    /// unacknowledged and rethrows the write error: the original is never dropped. The caller
+    /// (<see cref="RedriveAsync"/>) hands an <see cref="IRewinder"/> transport back to the broker.
+    /// </summary>
+    private static async Task RestoreAsync(ITransport transport, string dlq, Reserved message)
+    {
+        await RepublishAsync(transport, dlq, message.Body, message).ConfigureAwait(false);
+        await transport.AckAsync(message).ConfigureAwait(false);
     }
 
     /// <summary>
