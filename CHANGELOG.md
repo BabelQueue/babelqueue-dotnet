@@ -9,6 +9,10 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+### Changed
+
+- Tests only: the vendored conformance suite is now 1.3.0 (exact-case envelope keys, last-wins duplicates: new `invalid-wrong-case-job`, `wrong-case-keys-roundtrip` and `duplicate-keys-last-wins` fixtures). No production change; the .NET core already behaved this way.
+
 ### Added
 - `Redrive.IRewinder`: optional `Redrive.ITransport` capability (the counterpart of Go's `Rewinder`).
   `RedriveAsync` calls `RewindAsync` exactly once whenever an exception ends a run early — a failed
