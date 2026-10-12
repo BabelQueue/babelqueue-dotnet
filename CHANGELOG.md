@@ -11,10 +11,6 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [1.10.0] - 2026-10-12
 
-### Changed
-
-- Tests only: the vendored conformance suite is now 1.3.0 (exact-case envelope keys, last-wins duplicates: new `invalid-wrong-case-job`, `wrong-case-keys-roundtrip` and `duplicate-keys-last-wins` fixtures). No production change; the .NET core already behaved this way.
-
 ### Added
 - `Redrive.IRewinder`: optional `Redrive.ITransport` capability (the counterpart of Go's `Rewinder`).
   `RedriveAsync` calls `RewindAsync` exactly once whenever an exception ends a run early — a failed
@@ -27,6 +23,10 @@ The envelope wire format is versioned separately by `meta.schema_version`
   fails is reported in the same aggregate). A failed restore write never acknowledges the DLQ message
   and no longer masks the original error. Transports that do not implement `IRewinder` are
   unchanged. Additive — MINOR.
+
+### Changed
+
+- Tests only: the vendored conformance suite is now 1.3.0 (exact-case envelope keys, last-wins duplicates: new `invalid-wrong-case-job`, `wrong-case-keys-roundtrip` and `duplicate-keys-last-wins` fixtures). No production change; the .NET core already behaved this way.
 
 ## [1.9.0] - 2026-10-11
 
