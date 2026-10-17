@@ -35,10 +35,11 @@ public static class EnvelopeCodec
     };
 
     // Non-canonical keys (message-envelope.md §10). Policy K-15: decode warns and drops
-    // them (never captured as extras), encode never emits them.
+    // them (never captured as extras), encode rejects them. `urn` is also a known key, so
+    // decode resolves it as the alias of `job` first; the forbidden entry only governs encode.
     private static readonly HashSet<string> ForbiddenRootKeys = new(StringComparer.Ordinal)
     {
-        "timestamp",
+        "timestamp", "urn",
     };
 
     private static readonly HashSet<string> ForbiddenMetaKeys = new(StringComparer.Ordinal)
@@ -60,26 +61,49 @@ public static class EnvelopeCodec
     /// <c>attempts</c> starts at 0 and <c>meta</c> is stamped with a unique id, the
     /// source language, the schema version and a millisecond timestamp.
     /// </summary>
+    /// <remarks>
+    /// This four-parameter overload is kept with its exact pre-1.11.0 signature so that
+    /// assemblies compiled against earlier versions keep binding to it (adding a parameter,
+    /// even an optional one, is a binary-breaking change). To set producer <c>meta</c> entries
+    /// use <see cref="Make(string, IReadOnlyDictionary{string, object?}?, string, string?, IReadOnlyDictionary{string, object?}?)"/>.
+    /// </remarks>
+    /// <param name="urn">The stable URN, written to <c>job</c>.</param>
+    /// <param name="data">The pure-JSON payload (an empty object when null).</param>
+    /// <param name="queue">The logical queue name stamped into <c>meta.queue</c>.</param>
+    /// <param name="traceId">An inbound trace id to continue, or null to mint one.</param>
+    /// <exception cref="BabelQueueException">If <paramref name="urn"/> is null or blank.</exception>
+    public static Envelope Make(
+        string urn,
+        IReadOnlyDictionary<string, object?>? data = null,
+        string queue = "default",
+        string? traceId = null)
+        => Make(urn, data, queue, traceId, null);
+
+    /// <summary>
+    /// Like the four-parameter overload, and additionally merges producer-defined
+    /// <paramref name="meta"/> entries next to the core <c>meta</c> keys (ADR-0031 (b)).
+    /// </summary>
     /// <param name="urn">The stable URN, written to <c>job</c>.</param>
     /// <param name="data">The pure-JSON payload (an empty object when null).</param>
     /// <param name="queue">The logical queue name stamped into <c>meta.queue</c>.</param>
     /// <param name="traceId">An inbound trace id to continue, or null to mint one.</param>
     /// <param name="meta">
-    /// Optional extra <c>meta</c> entries (ADR-0031 (b)), merged next to the core keys. Each
-    /// entry is one flat <c>meta</c> key; a vendor block belongs under <c>ext</c>
-    /// (<c>["ext"] = { "acme": {...} }</c>). Values must be JSON-serializable.
+    /// Extra <c>meta</c> entries, or null for none. Each entry is one flat <c>meta</c> key; a
+    /// vendor block belongs under <c>ext</c> (<c>["ext"] = { "acme": {...} }</c>). Values must be
+    /// JSON-serializable.
     /// </param>
     /// <exception cref="BabelQueueException">
-    /// If <paramref name="urn"/> is null or blank, or if <paramref name="meta"/> uses a core
+    /// If <paramref name="urn"/> is null or blank, if <paramref name="meta"/> uses a core
     /// <c>meta</c> key (<c>id</c>, <c>queue</c>, <c>lang</c>, <c>schema_version</c>,
-    /// <c>created_at</c>) or a forbidden key of message-envelope.md §10.
+    /// <c>created_at</c>) or a forbidden key of message-envelope.md §10, or if a value cannot be
+    /// serialized to JSON (the serializer's exception is kept as the inner exception).
     /// </exception>
     public static Envelope Make(
         string urn,
-        IReadOnlyDictionary<string, object?>? data = null,
-        string queue = "default",
-        string? traceId = null,
-        IReadOnlyDictionary<string, object?>? meta = null)
+        IReadOnlyDictionary<string, object?>? data,
+        string queue,
+        string? traceId,
+        IReadOnlyDictionary<string, object?>? meta)
     {
         var resolvedUrn = TrimAscii(urn ?? string.Empty);
         if (resolvedUrn.Length == 0)
@@ -135,7 +159,15 @@ public static class EnvelopeCodec
                     $"BabelQueue: meta entry '/meta/{key}' is a forbidden envelope key "
                     + "(non-canonical, message-envelope.md §10).");
             }
-            extras[key] = JsonSerializer.SerializeToElement(value, EncodeOptions);
+            try
+            {
+                extras[key] = JsonSerializer.SerializeToElement(value, EncodeOptions);
+            }
+            catch (Exception e) when (e is JsonException or NotSupportedException or InvalidOperationException)
+            {
+                throw new BabelQueueException(
+                    $"BabelQueue: meta entry '/meta/{key}' is not JSON-serializable: {e.Message}", e);
+            }
         }
         return extras;
     }

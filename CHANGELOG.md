@@ -18,7 +18,11 @@ The envelope stays frozen at `schema_version: 1`.
 - `EnvelopeCodec.Make(..., IReadOnlyDictionary<string, object?>? meta = null)`: producer-defined
   `meta` entries, preserved on every re-emit. A key colliding with a core `meta` key (`id`, `queue`,
   `lang`, `schema_version`, `created_at`) or a forbidden one (`max_retries`, `attempts`, `source`,
-  `ts`) throws `BabelQueueException`. Existing calls are unaffected.
+  `ts`) throws `BabelQueueException`, as does a value that cannot be serialized to JSON (the
+  serializer error is the inner exception). The four-parameter `Make(urn, data, queue, traceId)`
+  is kept as a separate overload with its exact pre-1.11.0 signature, so assemblies compiled
+  against earlier Core versions stay binary-compatible; the `meta` overload takes all five
+  parameters.
 - Decode warns (`'/urn'`) when `job` and `urn` arrive together: `job` is kept and `urn` is dropped.
 - Tests: the conformance runners execute `extension_write` and `encode_reject` and the conformance
   1.4.0 optional fields (`expect_preserved`, `expect_absent_after_reencode`, `apply_dead_letter`,

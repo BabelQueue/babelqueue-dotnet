@@ -56,7 +56,7 @@ public sealed class Outbox
     /// right queue without decoding the body. Returns the new outbox row id (for the caller's own
     /// correlation, if wanted). Does <b>not</b> begin or commit any transaction.
     /// </summary>
-    /// <param name="envelope">A canonical envelope from <see cref="EnvelopeCodec.Make"/> / <see cref="EnvelopeCodec.FromMessage"/>.</param>
+    /// <param name="envelope">A canonical envelope from <see cref="EnvelopeCodec.Make(string, IReadOnlyDictionary{string, object?}?, string, string?)"/> / <see cref="EnvelopeCodec.FromMessage"/>.</param>
     /// <param name="cancellationToken">Cancels the persist operation.</param>
     /// <returns>The outbox row id.</returns>
     public Task<string> WriteAsync(Envelope envelope, CancellationToken cancellationToken = default)

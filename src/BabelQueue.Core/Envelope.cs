@@ -10,7 +10,7 @@ namespace BabelQueue;
 /// consumes identically — no language-specific serialization on the wire.
 /// </summary>
 /// <remarks>
-/// Build one with <see cref="EnvelopeCodec.Make"/>, render it with
+/// Build one with <see cref="EnvelopeCodec.Make(string, IReadOnlyDictionary{string, object?}?, string, string?)"/>, render it with
 /// <see cref="EnvelopeCodec.Encode"/>, and parse inbound bytes with
 /// <see cref="EnvelopeCodec.Decode(string)"/>. The record is immutable; use a
 /// <c>with</c> expression (or <see cref="DeadLetters.Annotate"/>) to derive copies;

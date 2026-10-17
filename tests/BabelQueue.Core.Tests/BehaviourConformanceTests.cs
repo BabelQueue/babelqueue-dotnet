@@ -16,7 +16,9 @@ namespace BabelQueue.Tests;
 /// are rejected, never dropped),
 /// <c>data_shape</c> (<c>data</c> is always an object), <c>forbidden_keys</c> (K-15: warn,
 /// drop, never re-emit) and <c>payload_schema_unicode</c> (minLength counts code points).
-/// None of them is ever skipped: a missing or empty section fails the run.
+/// A missing or empty section fails the run. The only skipped case is <c>reject-repeated-key</c>
+/// (it needs <c>meta_entries</c>; one dictionary per call cannot repeat a key), which the manifest
+/// allows an SDK to skip; <c>EncodeRejectsCoreAndForbiddenKeys</c> asserts exactly that list.
 /// </summary>
 public class BehaviourConformanceTests
 {
@@ -205,6 +207,8 @@ public class BehaviourConformanceTests
         var made = EnvelopeCodec.Make(
             "urn:acme:a",
             new Dictionary<string, object?> { ["k"] = 1 },
+            queue: "default",
+            traceId: null,
             meta: new Dictionary<string, object?> { ["ext"] = new Dictionary<string, object?> { ["tenant"] = "t-9" } });
 
         var decoded = EnvelopeCodec.Decode(EnvelopeCodec.Encode(made));
@@ -227,7 +231,7 @@ public class BehaviourConformanceTests
     public void MakeRejectsCoreAndForbiddenMetaKeys(string key)
     {
         var ex = Assert.Throws<BabelQueueException>(() =>
-            EnvelopeCodec.Make("urn:acme:a", meta: new Dictionary<string, object?> { [key] = 1 }));
+            EnvelopeCodec.Make("urn:acme:a", null, "default", null, new Dictionary<string, object?> { [key] = 1 }));
         Assert.Contains("/meta/" + key, ex.Message, StringComparison.Ordinal);
     }
 
@@ -272,6 +276,55 @@ public class BehaviourConformanceTests
         Assert.Equal("urn:acme:a", envelope.Job);
         Assert.Contains(warnings, w => w.Contains("'/urn'", StringComparison.Ordinal));
         Assert.DoesNotContain("\"urn\"", EnvelopeCodec.Encode(envelope), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LegacyFourParameterMakeOverloadStillExists()
+    {
+        // Binary compatibility: assemblies compiled against Core < 1.11.0 reference this exact
+        // signature; adding a parameter (even an optional one) would throw MissingMethodException.
+        var legacy = typeof(EnvelopeCodec).GetMethod(
+            "Make",
+            new[] { typeof(string), typeof(IReadOnlyDictionary<string, object?>), typeof(string), typeof(string) });
+        Assert.NotNull(legacy);
+        Assert.Equal(typeof(Envelope), legacy!.ReturnType);
+
+        var envelope = (Envelope)legacy.Invoke(null, new object?[] { "urn:acme:a", null, "orders", "t-1" })!;
+        Assert.Equal("urn:acme:a", envelope.Job);
+        Assert.Equal("t-1", envelope.TraceId);
+        Assert.Equal("orders", envelope.Meta!.Queue);
+        Assert.Null(envelope.Meta.Extras);
+    }
+
+    [Fact]
+    public void ShortMakeCallsBindWithoutAmbiguity()
+    {
+        Assert.Equal("default", EnvelopeCodec.Make("urn:acme:a").Meta!.Queue);
+        Assert.Equal("orders", EnvelopeCodec.Make("urn:acme:a", null, "orders").Meta!.Queue);
+        Assert.Equal("t-2", EnvelopeCodec.Make("urn:acme:a", traceId: "t-2").TraceId);
+    }
+
+    [Fact]
+    public void MakeWrapsAnUnserializableMetaValueInBabelQueueException()
+    {
+        var cyclic = new Dictionary<string, object?>();
+        cyclic["self"] = cyclic;
+
+        var ex = Assert.Throws<BabelQueueException>(() =>
+            EnvelopeCodec.Make("urn:acme:a", null, "default", null, new Dictionary<string, object?> { ["ext"] = cyclic }));
+        Assert.Contains("/meta/ext", ex.Message, StringComparison.Ordinal);
+        Assert.NotNull(ex.InnerException);
+    }
+
+    [Fact]
+    public void EncodeReportsUrnInExtrasAsForbiddenNotAsCollision()
+    {
+        var made = EnvelopeCodec.Make("urn:acme:a");
+        var extras = new Dictionary<string, JsonElement> { ["urn"] = JsonSerializer.SerializeToElement("x") };
+
+        var ex = Assert.Throws<BabelQueueException>(() => EnvelopeCodec.Encode(made with { Extras = extras }));
+        Assert.Contains("forbidden", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("'/urn'", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -441,6 +494,7 @@ internal static class ConformanceRunner
             testCase.GetProperty("urn").GetString()!,
             ToMap(testCase.GetProperty("data")),
             testCase.GetProperty("queue").GetString()!,
+            traceId: null,
             meta: ToMap(testCase.GetProperty("meta")));
 
         var encoded = EnvelopeCodec.Encode(envelope);
@@ -470,6 +524,7 @@ internal static class ConformanceRunner
                 testCase.GetProperty("urn").GetString()!,
                 ToMap(testCase.GetProperty("data")),
                 testCase.GetProperty("queue").GetString()!,
+                traceId: null,
                 meta: testCase.TryGetProperty("meta", out var meta) ? ToMap(meta) : null);
 
             if (testCase.TryGetProperty("extras_top", out var top))

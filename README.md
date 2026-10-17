@@ -58,12 +58,18 @@ var env = EnvelopeCodec.Make(
     "urn:babel:orders:created",
     new Dictionary<string, object?> { ["order_id"] = 1042L },
     queue: "orders",
+    traceId: null,
     meta: new Dictionary<string, object?> { ["tenant"] = "acme" });
 ```
 
+The `meta` overload takes all five parameters (`urn`, `data`, `queue`, `traceId`, `meta`). The
+four-parameter `Make(urn, data, queue, traceId)` is kept with its exact signature, so adapters
+compiled against earlier Core versions keep working without a rebuild.
+
 A key that collides with a core `meta` key (`id`, `queue`, `lang`, `schema_version`,
 `created_at`) or a forbidden one (`max_retries`, `attempts`, `source`, `ts`) throws a
-`BabelQueueException`; nothing is silently dropped. `Encode` applies the same rule to
+`BabelQueueException` (as does a value that cannot be serialized to JSON, with the serializer
+error as the inner exception); nothing is silently dropped. `Encode` applies the same rule to
 `Extras` filled by hand: a core or forbidden key throws instead of being skipped.
 
 On `Decode`, a `job` that is blank after trimming only ASCII whitespace (space, `\t`, `\n`,
@@ -297,11 +303,13 @@ byte-for-byte.
 dotnet test
 ```
 
-The behaviour sections of the manifest (conformance 1.4.0) are all executed, never skipped:
+The behaviour sections of the manifest (conformance 1.4.0) are all executed:
 `roundtrip` (including `expect_absent_after_reencode`, and `apply_dead_letter` /
 `expect_dead_letter`, which route the message through `DeadLetters` and check the
 dead-letter copy), `forbidden_keys` (including `expect_preserved`), `extension_write`
-(`Make(..., meta)`) and `encode_reject` (core or forbidden keys throw on encode). A unit test
+(`Make(..., meta)`) and `encode_reject` (core or forbidden keys throw on encode). The one
+skipped case is `reject-repeated-key` (it needs `meta_entries`; one dictionary per call cannot
+repeat a key), as the manifest allows. A unit test
 feeds the runner synthetic violations to prove these fields are really evaluated.
 
 ## License
