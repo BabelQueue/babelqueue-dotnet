@@ -50,7 +50,7 @@ if (EnvelopeCodec.Accepts(incoming))
 
 ### Producer `meta` entries
 
-`Make` takes an optional `meta` dictionary for producer-defined `meta` keys. They are written
+A `Make` overload takes a `meta` dictionary for producer-defined `meta` keys. They are written
 next to the core `meta` keys and survive every re-emit (retry, dead-letter, redrive):
 
 ```csharp

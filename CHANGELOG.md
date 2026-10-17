@@ -15,7 +15,7 @@ Implements ADR-0031 (producer `meta` write API, encode-time rejection, closed AS
 The envelope stays frozen at `schema_version: 1`.
 
 ### Added
-- `EnvelopeCodec.Make(..., IReadOnlyDictionary<string, object?>? meta = null)`: producer-defined
+- `EnvelopeCodec.Make(urn, data, queue, traceId, meta)` (new overload, all parameters required): producer-defined
   `meta` entries, preserved on every re-emit. A key colliding with a core `meta` key (`id`, `queue`,
   `lang`, `schema_version`, `created_at`) or a forbidden one (`max_retries`, `attempts`, `source`,
   `ts`) throws `BabelQueueException`, as does a value that cannot be serialized to JSON (the
