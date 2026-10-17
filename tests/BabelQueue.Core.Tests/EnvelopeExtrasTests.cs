@@ -108,32 +108,50 @@ public class EnvelopeExtrasTests
         Assert.DoesNotContain("timestamp", EnvelopeCodec.Encode(envelope), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void EncodeNeverEmitsForbiddenOrCanonicalNamesFromExtras()
+    [Theory]
+    [InlineData("timestamp")]
+    [InlineData("job")]
+    [InlineData("attempts")]
+    public void EncodeRejectsForbiddenOrCanonicalNamesInRootExtras(string key)
     {
-        using var forbidden = JsonDocument.Parse("{\"timestamp\":1,\"max_retries\":2,\"job\":\"evil\",\"ok\":true}");
-        var extras = new Dictionary<string, JsonElement>();
-        foreach (var prop in forbidden.RootElement.EnumerateObject())
-        {
-            extras[prop.Name] = prop.Value.Clone();
-        }
         var made = EnvelopeCodec.Make("urn:babel:a:b");
-        var envelope = made with
-        {
-            Extras = extras,
-            Meta = made.Meta! with { Extras = new Dictionary<string, JsonElement>(extras) },
-        };
+        var envelope = made with { Extras = Extra(key) };
+
+        var ex = Assert.Throws<BabelQueueException>(() => EnvelopeCodec.Encode(envelope));
+        Assert.Contains(key, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("max_retries")]
+    [InlineData("attempts")]
+    [InlineData("source")]
+    [InlineData("ts")]
+    [InlineData("id")]
+    [InlineData("created_at")]
+    public void EncodeRejectsForbiddenOrCanonicalNamesInMetaExtras(string key)
+    {
+        var made = EnvelopeCodec.Make("urn:babel:a:b");
+        var envelope = made with { Meta = made.Meta! with { Extras = Extra(key) } };
+
+        var ex = Assert.Throws<BabelQueueException>(() => EnvelopeCodec.Encode(envelope));
+        Assert.Contains("/meta/" + key, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MetaTimestampAndJobAreOrdinaryExtrasInsideMeta()
+    {
+        // `timestamp` / `job` are only reserved at the top level; inside meta they are plain extras.
+        var made = EnvelopeCodec.Make("urn:babel:a:b");
+        var extras = Extra("timestamp");
+        extras["job"] = JsonSerializer.SerializeToElement("evil");
+        var envelope = made with { Meta = made.Meta! with { Extras = extras } };
 
         using var doc = JsonDocument.Parse(EnvelopeCodec.Encode(envelope));
-        var root = doc.RootElement;
-        Assert.False(root.TryGetProperty("timestamp", out _));
-        Assert.Equal("urn:babel:a:b", root.GetProperty("job").GetString());
-        Assert.True(root.GetProperty("ok").GetBoolean());
-        var meta = root.GetProperty("meta");
-        Assert.False(meta.TryGetProperty("max_retries", out _));
-        Assert.True(meta.GetProperty("ok").GetBoolean());
-        // `timestamp` / `job` are only reserved at the top level; inside meta they are plain extras.
+        var meta = doc.RootElement.GetProperty("meta");
         Assert.Equal(1, meta.GetProperty("timestamp").GetInt32());
         Assert.Equal("evil", meta.GetProperty("job").GetString());
     }
+
+    private static Dictionary<string, JsonElement> Extra(string key) =>
+        new() { [key] = JsonSerializer.SerializeToElement(1) };
 }

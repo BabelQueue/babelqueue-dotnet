@@ -9,6 +9,32 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-17
+
+Implements ADR-0031 (producer `meta` write API, encode-time rejection, closed ASCII blank set).
+The envelope stays frozen at `schema_version: 1`.
+
+### Added
+- `EnvelopeCodec.Make(..., IReadOnlyDictionary<string, object?>? meta = null)`: producer-defined
+  `meta` entries, preserved on every re-emit. A key colliding with a core `meta` key (`id`, `queue`,
+  `lang`, `schema_version`, `created_at`) or a forbidden one (`max_retries`, `attempts`, `source`,
+  `ts`) throws `BabelQueueException`. Existing calls are unaffected.
+- Decode warns (`'/urn'`) when `job` and `urn` arrive together: `job` is kept and `urn` is dropped.
+- Tests: the conformance runners execute `extension_write` and `encode_reject` and the conformance
+  1.4.0 optional fields (`expect_preserved`, `expect_absent_after_reencode`, `apply_dead_letter`,
+  `expect_dead_letter`), with unit tests proving a violation is reported.
+
+### Changed
+- **Behaviour change.** `EnvelopeCodec.Encode` now throws `BabelQueueException` for a core or
+  forbidden key found in `Extras` (root or `meta`), including `Extras` filled directly, instead of
+  silently skipping it.
+- **Behaviour change.** The blank-`job` check (fallback to `urn`, `Urn()`, `Make`) uses the closed
+  ASCII set (space, `\t`, `\n`, `\v`, `\f`, `\r`) instead of Unicode whitespace, for cross-SDK parity.
+  A `job` made only of non-ASCII whitespace (U+00A0, U+0085, U+2003, ...) carrying a valid `urn` no
+  longer routes to the `urn` handler; it falls to the unknown-URN strategy (`fail` / `delete` /
+  `release`). With `delete` it is removed silently. With `fail` and a DLQ, decode drops `urn`, so
+  the DLQ copy loses its routable identity (ADR-0031 Consequences/Negative).
+
 ## [1.10.0] - 2026-10-12
 
 ### Added

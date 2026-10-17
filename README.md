@@ -48,6 +48,29 @@ if (EnvelopeCodec.Accepts(incoming))
 }
 ```
 
+### Producer `meta` entries
+
+`Make` takes an optional `meta` dictionary for producer-defined `meta` keys. They are written
+next to the core `meta` keys and survive every re-emit (retry, dead-letter, redrive):
+
+```csharp
+var env = EnvelopeCodec.Make(
+    "urn:babel:orders:created",
+    new Dictionary<string, object?> { ["order_id"] = 1042L },
+    queue: "orders",
+    meta: new Dictionary<string, object?> { ["tenant"] = "acme" });
+```
+
+A key that collides with a core `meta` key (`id`, `queue`, `lang`, `schema_version`,
+`created_at`) or a forbidden one (`max_retries`, `attempts`, `source`, `ts`) throws a
+`BabelQueueException`; nothing is silently dropped. `Encode` applies the same rule to
+`Extras` filled by hand: a core or forbidden key throws instead of being skipped.
+
+On `Decode`, a `job` that is blank after trimming only ASCII whitespace (space, `\t`, `\n`,
+`\v`, `\f`, `\r`) falls back to the inbound `urn` alias. A `job` made of non-ASCII whitespace
+(U+00A0, U+0085, U+2003, ...) is not blank. When `job` and `urn` arrive together, `job` wins,
+`urn` is dropped and a warning naming `'/urn'` is reported.
+
 The envelope is identical to every other SDK's:
 
 ```json
@@ -273,6 +296,13 @@ byte-for-byte.
 ```bash
 dotnet test
 ```
+
+The behaviour sections of the manifest (conformance 1.4.0) are all executed, never skipped:
+`roundtrip` (including `expect_absent_after_reencode`, and `apply_dead_letter` /
+`expect_dead_letter`, which route the message through `DeadLetters` and check the
+dead-letter copy), `forbidden_keys` (including `expect_preserved`), `extension_write`
+(`Make(..., meta)`) and `encode_reject` (core or forbidden keys throw on encode). A unit test
+feeds the runner synthetic violations to prove these fields are really evaluated.
 
 ## License
 

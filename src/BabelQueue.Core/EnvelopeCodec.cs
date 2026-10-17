@@ -60,14 +60,28 @@ public static class EnvelopeCodec
     /// <c>attempts</c> starts at 0 and <c>meta</c> is stamped with a unique id, the
     /// source language, the schema version and a millisecond timestamp.
     /// </summary>
-    /// <exception cref="BabelQueueException">If <paramref name="urn"/> is null or blank.</exception>
+    /// <param name="urn">The stable URN, written to <c>job</c>.</param>
+    /// <param name="data">The pure-JSON payload (an empty object when null).</param>
+    /// <param name="queue">The logical queue name stamped into <c>meta.queue</c>.</param>
+    /// <param name="traceId">An inbound trace id to continue, or null to mint one.</param>
+    /// <param name="meta">
+    /// Optional extra <c>meta</c> entries (ADR-0031 (b)), merged next to the core keys. Each
+    /// entry is one flat <c>meta</c> key; a vendor block belongs under <c>ext</c>
+    /// (<c>["ext"] = { "acme": {...} }</c>). Values must be JSON-serializable.
+    /// </param>
+    /// <exception cref="BabelQueueException">
+    /// If <paramref name="urn"/> is null or blank, or if <paramref name="meta"/> uses a core
+    /// <c>meta</c> key (<c>id</c>, <c>queue</c>, <c>lang</c>, <c>schema_version</c>,
+    /// <c>created_at</c>) or a forbidden key of message-envelope.md §10.
+    /// </exception>
     public static Envelope Make(
         string urn,
         IReadOnlyDictionary<string, object?>? data = null,
         string queue = "default",
-        string? traceId = null)
+        string? traceId = null,
+        IReadOnlyDictionary<string, object?>? meta = null)
     {
-        var resolvedUrn = (urn ?? string.Empty).Trim();
+        var resolvedUrn = TrimAscii(urn ?? string.Empty);
         if (resolvedUrn.Length == 0)
         {
             throw new BabelQueueException(
@@ -85,14 +99,45 @@ public static class EnvelopeCodec
             ? new Dictionary<string, object?>()
             : new Dictionary<string, object?>(data);
 
-        var meta = new Meta(
+        var metaExtras = ToMetaExtras(meta);
+
+        var metaBlock = new Meta(
             Guid.NewGuid().ToString(),
             queue ?? "default",
             SourceLang,
             SchemaVersion,
-            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+        {
+            Extras = metaExtras,
+        };
 
-        return new Envelope(resolvedUrn, trace, payload, meta, 0, null);
+        return new Envelope(resolvedUrn, trace, payload, metaBlock, 0, null);
+    }
+
+    private static Dictionary<string, JsonElement>? ToMetaExtras(IReadOnlyDictionary<string, object?>? meta)
+    {
+        if (meta is null || meta.Count == 0)
+        {
+            return null;
+        }
+        var extras = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var (key, value) in meta)
+        {
+            if (KnownMetaKeys.Contains(key))
+            {
+                throw new BabelQueueException(
+                    $"BabelQueue: meta entry '/meta/{key}' collides with a core meta key; "
+                    + "the SDK owns id, queue, lang, schema_version and created_at.");
+            }
+            if (ForbiddenMetaKeys.Contains(key))
+            {
+                throw new BabelQueueException(
+                    $"BabelQueue: meta entry '/meta/{key}' is a forbidden envelope key "
+                    + "(non-canonical, message-envelope.md §10).");
+            }
+            extras[key] = JsonSerializer.SerializeToElement(value, EncodeOptions);
+        }
+        return extras;
     }
 
     /// <summary>
@@ -111,8 +156,13 @@ public static class EnvelopeCodec
     /// unescaped, matching the other SDK cores; the field order is canonical. Unknown
     /// keys carried in <see cref="Meta.Extras"/> / <see cref="Envelope.Extras"/> are
     /// written after the canonical fields (in their captured order); canonical names
-    /// and the forbidden keys of message-envelope.md §10 are never emitted from extras.
+    /// and the forbidden keys of message-envelope.md §10 are rejected, never silently
+    /// dropped (ADR-0031 (c)).
     /// </summary>
+    /// <exception cref="BabelQueueException">
+    /// If the extras hold a canonical or forbidden key (<c>/timestamp</c>, <c>/urn</c>,
+    /// <c>/meta/max_retries</c>, <c>/meta/id</c>, …).
+    /// </exception>
     public static string Encode(Envelope envelope)
     {
         var meta = envelope.Meta;
@@ -124,7 +174,7 @@ public static class EnvelopeCodec
             ["schema_version"] = meta?.SchemaVersion ?? 0,
             ["created_at"] = meta?.CreatedAt ?? 0L,
         };
-        AppendExtras(metaMap, meta?.Extras, KnownMetaKeys, ForbiddenMetaKeys);
+        AppendExtras(metaMap, meta?.Extras, KnownMetaKeys, ForbiddenMetaKeys, "/meta/");
 
         var root = new Dictionary<string, object?>
         {
@@ -149,7 +199,7 @@ public static class EnvelopeCodec
             };
         }
 
-        AppendExtras(root, envelope.Extras, KnownRootKeys, ForbiddenRootKeys);
+        AppendExtras(root, envelope.Extras, KnownRootKeys, ForbiddenRootKeys, "/");
 
         return JsonSerializer.Serialize(root, EncodeOptions);
     }
@@ -197,14 +247,23 @@ public static class EnvelopeCodec
             return Empty();
         }
 
+        // ADR-0031 (c): `job` is blank only for the closed ASCII whitespace set, then `urn`
+        // (the inbound alias) is the identity. Otherwise `job` wins and a present `urn`
+        // is dropped with a warning; `urn` is never retained as an extra.
         var job = GetString(root, "job");
-        if (string.IsNullOrWhiteSpace(job))
+        var aliasUsed = false;
+        if (IsBlank(job))
         {
             var alias = GetString(root, "urn");
             if (alias is not null)
             {
                 job = alias;
+                aliasUsed = true;
             }
+        }
+        if (!aliasUsed && root.TryGetProperty("urn", out _))
+        {
+            warn(ForbiddenKeyWarning("/urn"));
         }
 
         return new Envelope(
@@ -220,7 +279,7 @@ public static class EnvelopeCodec
     }
 
     /// <summary>The message URN — the canonical <c>job</c>, with the <c>urn</c> alias resolved by <see cref="Decode(string)"/>.</summary>
-    public static string Urn(Envelope envelope) => envelope.Job?.Trim() ?? string.Empty;
+    public static string Urn(Envelope envelope) => TrimAscii(envelope.Job ?? string.Empty);
 
     /// <summary>
     /// Whether a consumer should accept this envelope: rejects a missing URN, an
@@ -243,6 +302,18 @@ public static class EnvelopeCodec
         }
         return !string.IsNullOrWhiteSpace(envelope.TraceId);
     }
+
+    // The closed blank set of ADR-0031 (c): space, \t, \n, \v, \f, \r. Unicode whitespace
+    // (U+00A0, U+0085, U+2003, ...) is deliberately NOT blank, for cross-SDK parity (GR-5).
+    private static readonly char[] AsciiWhitespace = { ' ', '\t', '\n', '\v', '\f', '\r' };
+
+    private static string TrimAscii(string value) => value.Trim(AsciiWhitespace);
+
+    private static bool IsBlank(string? value) => value is null || TrimAscii(value).Length == 0;
+
+    private static string ForbiddenKeyWarning(string pointer)
+        => $"BabelQueue: dropped forbidden envelope key '{pointer}' "
+            + "(non-canonical, message-envelope.md §10); it is ignored and never re-emitted.";
 
     private static Envelope Empty() => new(null, null, null, null, 0, null);
 
@@ -284,8 +355,7 @@ public static class EnvelopeCodec
             }
             if (forbidden.Contains(property.Name))
             {
-                warn($"BabelQueue: dropped forbidden envelope key '{pointerPrefix}{property.Name}' "
-                    + "(non-canonical, message-envelope.md §10); it is ignored and never re-emitted.");
+                warn(ForbiddenKeyWarning(pointerPrefix + property.Name));
                 continue;
             }
             extras ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
@@ -295,15 +365,16 @@ public static class EnvelopeCodec
     }
 
     /// <summary>
-    /// Appends carried extras after the canonical fields already in <paramref name="target"/>,
-    /// skipping canonical names (the typed field always wins), forbidden keys and
-    /// undefined elements.
+    /// Appends carried extras after the canonical fields already in <paramref name="target"/>.
+    /// A canonical or forbidden key is rejected with a <see cref="BabelQueueException"/>
+    /// (ADR-0031 (c): never a silent drop); undefined elements are skipped.
     /// </summary>
     private static void AppendExtras(
         Dictionary<string, object?> target,
         Dictionary<string, JsonElement>? extras,
         HashSet<string> known,
-        HashSet<string> forbidden)
+        HashSet<string> forbidden,
+        string pointerPrefix)
     {
         if (extras is null)
         {
@@ -311,10 +382,19 @@ public static class EnvelopeCodec
         }
         foreach (var (key, value) in extras)
         {
-            if (known.Contains(key)
-                || forbidden.Contains(key)
-                || target.ContainsKey(key)
-                || value.ValueKind == JsonValueKind.Undefined)
+            if (forbidden.Contains(key))
+            {
+                throw new BabelQueueException(
+                    $"BabelQueue: cannot encode forbidden envelope key '{pointerPrefix}{key}' "
+                    + "(non-canonical, message-envelope.md §10).");
+            }
+            if (known.Contains(key) || target.ContainsKey(key))
+            {
+                throw new BabelQueueException(
+                    $"BabelQueue: cannot encode extra key '{pointerPrefix}{key}': it collides "
+                    + "with a canonical envelope key.");
+            }
+            if (value.ValueKind == JsonValueKind.Undefined)
             {
                 continue;
             }
