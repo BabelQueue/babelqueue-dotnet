@@ -3,6 +3,8 @@
 [![CI](https://github.com/BabelQueue/babelqueue-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/BabelQueue/babelqueue-dotnet/actions/workflows/ci.yml)
 [![NuGet](https://img.shields.io/nuget/v/BabelQueue.Core.svg)](https://www.nuget.org/packages/BabelQueue.Core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Live interop](https://img.shields.io/endpoint?url=https%3A%2F%2Fbabelqueue.com%2Fbadges%2Fnightly.json)](https://babelqueue.com/compatibility/)
+[![BabelQueue conformance](https://img.shields.io/badge/BabelQueue-conformance%20matrix-10B981.svg)](https://babelqueue.com/compatibility/)
 
 > **Polyglot Queues, Simplified.** Read and write the canonical BabelQueue message
 > envelope from .NET — so your C#/.NET services exchange messages with Laravel,
