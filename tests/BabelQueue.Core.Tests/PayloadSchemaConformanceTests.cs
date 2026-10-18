@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.Json;
 using BabelQueue.Schema;
 using Xunit;
 
@@ -29,13 +30,12 @@ public class PayloadSchemaConformanceTests
         var cases = Assert.IsAssignableFrom<IReadOnlyList<object?>>(section["cases"]);
         Assert.NotEmpty(cases);
 
-        foreach (var caseObj in cases)
+        var violations = new List<string>();
+        using var doc = JsonDocument.Parse(File.ReadAllText(SuitePath("manifest.json")));
+        foreach (var testCase in doc.RootElement.GetProperty("payload_schema").GetProperty("cases").EnumerateArray())
         {
-            var testCase = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(caseObj);
-            var data = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(testCase["data"]);
-            var expected = testCase["valid"] is true;
-            var isValid = PayloadValidator.Validate(schema, data) is null;
-            Assert.Equal(expected, isValid);
+            violations.AddRange(ConformanceRunner.PayloadSchemaCase(schema, testCase));
         }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
     }
 }

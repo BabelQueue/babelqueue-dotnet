@@ -113,7 +113,7 @@ public static class EnvelopeCodec
                 + "can identify it without any class name.");
         }
 
-        var trace = (traceId ?? string.Empty).Trim();
+        var trace = TrimAscii(traceId ?? string.Empty);
         if (trace.Length == 0)
         {
             trace = Guid.NewGuid().ToString();
@@ -282,7 +282,13 @@ public static class EnvelopeCodec
         // ADR-0031 (c): `job` is blank only for the closed ASCII whitespace set, then `urn`
         // (the inbound alias) is the identity. Otherwise `job` wins and a present `urn`
         // is dropped with a warning; `urn` is never retained as an extra.
+        // ADR-0032 §6: a `job` that is present but not a JSON string is ignored with a warning;
+        // a blank string `job` falls back to `urn` silently; a non-string `urn` is ignored.
         var job = GetString(root, "job");
+        if (job is null && root.TryGetProperty("job", out _))
+        {
+            warn(NonStringJobWarning());
+        }
         var aliasUsed = false;
         if (IsBlank(job))
         {
@@ -295,7 +301,9 @@ public static class EnvelopeCodec
         }
         if (!aliasUsed && root.TryGetProperty("urn", out _))
         {
-            warn(ForbiddenKeyWarning("/urn"));
+            // A non-string `urn` that was needed as the identity fallback is ignored for its type,
+            // not dropped as a forbidden key; the warning says which.
+            warn(IsBlank(job) && GetString(root, "urn") is null ? NonStringUrnWarning() : ForbiddenKeyWarning("/urn"));
         }
 
         return new Envelope(
@@ -332,16 +340,24 @@ public static class EnvelopeCodec
         {
             return false;
         }
-        return !string.IsNullOrWhiteSpace(envelope.TraceId);
+        return !IsBlank(envelope.TraceId);
     }
 
     // The closed blank set of ADR-0031 (c): space, \t, \n, \v, \f, \r. Unicode whitespace
     // (U+00A0, U+0085, U+2003, ...) is deliberately NOT blank, for cross-SDK parity (GR-5).
     private static readonly char[] AsciiWhitespace = { ' ', '\t', '\n', '\v', '\f', '\r' };
 
-    private static string TrimAscii(string value) => value.Trim(AsciiWhitespace);
+    internal static string TrimAscii(string value) => value.Trim(AsciiWhitespace);
 
-    private static bool IsBlank(string? value) => value is null || TrimAscii(value).Length == 0;
+    internal static bool IsBlank([System.Diagnostics.CodeAnalysis.NotNullWhen(false)] string? value) => value is null || TrimAscii(value).Length == 0;
+
+    private static string NonStringJobWarning()
+        => "BabelQueue: ignored envelope key 'job': it is not a string (ADR-0032 §6); "
+            + "the 'urn' alias is used when it is a valid string.";
+
+    private static string NonStringUrnWarning()
+        => "BabelQueue: ignored envelope key 'urn': it is not a string (ADR-0032 §6); "
+            + "the message carries no usable identity.";
 
     private static string ForbiddenKeyWarning(string pointer)
         => $"BabelQueue: dropped forbidden envelope key '{pointer}' "

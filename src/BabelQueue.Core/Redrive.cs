@@ -197,7 +197,7 @@ public static class Redrive
                 // Decode never throws — a malformed/non-object body yields an empty envelope
                 // (a null Job), which is not redrivable; restore it rather than drop it.
                 var envelope = EnvelopeCodec.Decode(message.Body);
-                if (string.IsNullOrWhiteSpace(envelope.Job))
+                if (EnvelopeCodec.IsBlank(envelope.Job))
                 {
                     await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
                     skipped++;
@@ -216,8 +216,8 @@ public static class Redrive
                     continue;
                 }
 
-                var target = !string.IsNullOrWhiteSpace(options.ToQueue) ? options.ToQueue : SourceQueueOf(envelope);
-                if (string.IsNullOrWhiteSpace(target))
+                var target = !EnvelopeCodec.IsBlank(options.ToQueue) ? options.ToQueue : SourceQueueOf(envelope);
+                if (EnvelopeCodec.IsBlank(target))
                 {
                     // no source/sandbox queue to send it to — leave it on the DLQ
                     await RestoreAsync(transport, dlq, message).ConfigureAwait(false);
@@ -336,7 +336,7 @@ public static class Redrive
     private static string? SourceQueueOf(Envelope envelope)
     {
         if (envelope.DeadLetter is { OriginalQueue: var originalQueue }
-            && !string.IsNullOrWhiteSpace(originalQueue))
+            && !EnvelopeCodec.IsBlank(originalQueue))
         {
             return originalQueue;
         }

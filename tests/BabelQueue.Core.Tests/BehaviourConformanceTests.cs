@@ -25,6 +25,8 @@ public class BehaviourConformanceTests
     private static string SuitePath(string relative) =>
         Path.Combine(AppContext.BaseDirectory, "conformance", relative);
 
+    private static string ReadFixture(string relative) => File.ReadAllText(SuitePath(relative));
+
     private static JsonElement Section(string name)
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(SuitePath("manifest.json")));
@@ -88,36 +90,150 @@ public class BehaviourConformanceTests
     public void DataShapeIsAlwaysAnObject()
     {
         var modes = new HashSet<string>();
+        var violations = new List<string>();
         foreach (var testCase in Cases("data_shape"))
         {
-            var name = testCase.GetProperty("name").GetString();
-            var mode = testCase.GetProperty("mode").GetString()!;
-            modes.Add(mode);
-
-            if (mode == "encode")
-            {
-                var data = SchemaJson.Parse(testCase.GetProperty("data").GetRawText())
-                    as IReadOnlyDictionary<string, object?>;
-                var envelope = EnvelopeCodec.Make(
-                    testCase.GetProperty("urn").GetString()!,
-                    data,
-                    testCase.GetProperty("queue").GetString()!);
-                using var output = JsonDocument.Parse(EnvelopeCodec.Encode(envelope));
-                var dataJson = JsonSerializer.Serialize(output.RootElement.GetProperty("data"));
-                Assert.Equal(testCase.GetProperty("expect_encoded_data_json").GetString(), dataJson);
-            }
-            else
-            {
-                Assert.Equal("decode", mode);
-                var raw = File.ReadAllText(SuitePath(testCase.GetProperty("file").GetString()!));
-                var accepted = EnvelopeCodec.Accepts(EnvelopeCodec.Decode(raw));
-                Assert.True(
-                    testCase.GetProperty("valid").GetBoolean() == accepted,
-                    $"{name}: expected valid={testCase.GetProperty("valid").GetBoolean()}");
-            }
+            modes.Add(testCase.GetProperty("mode").GetString()!);
+            violations.AddRange(ConformanceRunner.DataShape(testCase));
         }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
         Assert.Contains("encode", modes);
         Assert.Contains("decode", modes);
+    }
+
+    [Fact]
+    public void TrimSectionFollowsTheAsciiWhitespaceRule()
+    {
+        var violations = new List<string>();
+        var modes = new HashSet<string>();
+        foreach (var testCase in Cases("trim"))
+        {
+            modes.Add(testCase.GetProperty("mode").GetString()!);
+            violations.AddRange(ConformanceRunner.Trim(testCase, ReadFixture));
+        }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
+        Assert.Equal(new[] { "accepts", "decode", "make", "reemit" }, modes.OrderBy(m => m, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void JobTypeSectionIgnoresANonStringJob()
+    {
+        var violations = new List<string>();
+        foreach (var testCase in Cases("job_type"))
+        {
+            violations.AddRange(ConformanceRunner.JobType(testCase, ReadFixture));
+        }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void TraceparentSectionExtractsTheRemoteParent()
+    {
+        var violations = new List<string>();
+        foreach (var testCase in Cases("traceparent"))
+        {
+            violations.AddRange(ConformanceRunner.Traceparent(testCase));
+        }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void IdempotencySectionDedupesOnMetaId()
+    {
+        var violations = new List<string>();
+        var section = Section("idempotency");
+        violations.AddRange(ConformanceRunner.IdempotencyDedupKey(section.GetProperty("dedup_key"), ReadFixture));
+        var sequences = section.GetProperty("sequences").GetProperty("cases").EnumerateArray().ToList();
+        Assert.NotEmpty(sequences);
+        foreach (var sequence in sequences)
+        {
+            violations.AddRange(ConformanceRunner.IdempotencySequence(sequence));
+        }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void RunnerReportsATrimExpectationThatDiffers()
+    {
+        var makeCase = Synthetic("{\"name\":\"x\",\"mode\":\"make\",\"urn\":\" urn:acme:a \",\"expect\":{\"job\":\" urn:acme:a \"}}");
+        Assert.NotEmpty(ConformanceRunner.Trim(makeCase, ReadFixture));
+    }
+
+    [Fact]
+    public void RunnerReportsAJobTypeWarningThatWasNotEmitted()
+    {
+        const string valid =
+            "{\"job\":\"urn:acme:a\",\"trace_id\":\"t\",\"data\":{},\"meta\":{\"id\":\"i\",\"queue\":\"q\","
+            + "\"lang\":\"php\",\"schema_version\":1,\"created_at\":1},\"attempts\":0}";
+        var testCase = Synthetic(
+            "{\"name\":\"x\",\"file\":\"f.json\",\"valid\":true,\"expect\":{\"urn\":\"urn:acme:a\"},\"expect_warning\":true}");
+        Assert.NotEmpty(ConformanceRunner.JobType(testCase, _ => valid));
+    }
+
+    [Fact]
+    public void MakeKeepsUnicodeSpacePaddingAndTrimsOnlyTheAsciiSet()
+    {
+        // ADR-0032: U+00A0, U+2003 and U+3000 are not whitespace; the ASCII set is trimmed.
+        Assert.Equal("\u00a0urn:acme:a\u00a0", EnvelopeCodec.Make("\u00a0urn:acme:a\u00a0").Job);
+        Assert.Equal("\u2003urn:acme:a\u3000", EnvelopeCodec.Make(" \t\u2003urn:acme:a\u3000\f\n").Job);
+        Assert.Equal("\u00a0", EnvelopeCodec.Make("\u00a0").Job);
+        Assert.Throws<BabelQueueException>(() => EnvelopeCodec.Make(" \t\n\r\f\u000b"));
+        Assert.Equal("t-1", EnvelopeCodec.Make("urn:acme:a", null, "q", "\t t-1\n", null).TraceId);
+        Assert.Equal("\u00a0t-1", EnvelopeCodec.Make("urn:acme:a", null, "q", "\u00a0t-1", null).TraceId);
+    }
+
+    [Fact]
+    public void AsciiTrimIsLinearOnLongWhitespacePadding()
+    {
+        var padding = new string(' ', 200_000);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var job = EnvelopeCodec.Make(padding + "urn:acme:a" + padding).Job;
+        Assert.Throws<BabelQueueException>(() => EnvelopeCodec.Make(padding));
+        sw.Stop();
+
+        Assert.Equal("urn:acme:a", job);
+        Assert.True(sw.ElapsedMilliseconds < 1000, $"trim took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
+    public void BlankTraceIdIsRejectedOnlyForTheAsciiSet()
+    {
+        string Body(string traceId) =>
+            "{\"job\":\"urn:acme:a\",\"trace_id\":" + JsonSerializer.Serialize(traceId)
+            + ",\"data\":{},\"meta\":{\"id\":\"i\",\"queue\":\"q\",\"lang\":\"php\",\"schema_version\":1,\"created_at\":1},\"attempts\":0}";
+
+        Assert.False(EnvelopeCodec.Accepts(EnvelopeCodec.Decode(Body(" \t\n\r\f\u000b"))));
+        Assert.True(EnvelopeCodec.Accepts(EnvelopeCodec.Decode(Body("\u00a0"))));
+    }
+
+    [Fact]
+    public void NonStringJobIsIgnoredWithAWarningAndFallsBackToUrn()
+    {
+        var warnings = new List<string>();
+        var envelope = EnvelopeCodec.Decode(
+            "{\"job\":42,\"urn\":\"urn:acme:b\",\"trace_id\":\"t\",\"data\":{},"
+            + "\"meta\":{\"id\":\"i\",\"queue\":\"q\",\"lang\":\"php\",\"schema_version\":1,\"created_at\":1}}",
+            warnings.Add);
+        Assert.Equal("urn:acme:b", EnvelopeCodec.Urn(envelope));
+        Assert.Single(warnings);
+
+        var silent = new List<string>();
+        EnvelopeCodec.Decode("{\"job\":\" \",\"urn\":\"urn:acme:b\",\"trace_id\":\"t\",\"data\":{}}", silent.Add);
+        Assert.Empty(silent);
+
+        Assert.False(EnvelopeCodec.Accepts(EnvelopeCodec.Decode("{\"job\":null,\"trace_id\":\"t\",\"data\":{}}")));
+    }
+
+    [Fact]
+    public void BlankJobWithANonStringUrnWarnsAboutTheTypeNotAForbiddenKey()
+    {
+        var warnings = new List<string>();
+        var envelope = EnvelopeCodec.Decode("{\"job\":\" \",\"urn\":5,\"trace_id\":\"t\",\"data\":{}}", warnings.Add);
+
+        Assert.False(EnvelopeCodec.Accepts(envelope));
+        var warning = Assert.Single(warnings);
+        Assert.Contains("not a string", warning);
+        Assert.DoesNotContain("forbidden", warning);
     }
 
     [Fact]
@@ -354,14 +470,12 @@ public class BehaviourConformanceTests
         var cases = section.GetProperty("cases").EnumerateArray().ToList();
         Assert.NotEmpty(cases);
 
+        var violations = new List<string>();
         foreach (var testCase in cases)
         {
-            var data = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(
-                SchemaJson.Parse(testCase.GetProperty("data").GetRawText()));
-            var expected = testCase.GetProperty("valid").GetBoolean();
-            var isValid = PayloadValidator.Validate(schema, data) is null;
-            Assert.True(expected == isValid, $"{testCase.GetProperty("name").GetString()}: expected valid={expected}");
+            violations.AddRange(ConformanceRunner.PayloadSchemaCase(schema, testCase));
         }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
     }
 
     [Fact]
@@ -602,6 +716,291 @@ internal static class ConformanceRunner
 
     private static IReadOnlyDictionary<string, object?> ToMap(JsonElement element)
         => Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(SchemaJson.Parse(element.GetRawText()));
+
+    public static List<string> PayloadSchemaCase(IReadOnlyDictionary<string, object?> schema, JsonElement testCase)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var data = SchemaJson.Parse(testCase.GetProperty("data").GetRawText())
+            as IReadOnlyDictionary<string, object?>;
+        if (data is null)
+        {
+            return new List<string> { $"{name}: case data is not an object" };
+        }
+        var expected = testCase.GetProperty("valid").GetBoolean();
+        var isValid = PayloadValidator.Validate(schema, data) is null;
+        return expected == isValid
+            ? new List<string>()
+            : new List<string> { $"{name}: expected valid={expected} but the validator said valid={isValid}" };
+    }
+
+    public static List<string> DataShape(JsonElement testCase)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var mode = testCase.GetProperty("mode").GetString()!;
+        var violations = new List<string>();
+
+        if (mode == "encode")
+        {
+            var data = SchemaJson.Parse(testCase.GetProperty("data").GetRawText())
+                as IReadOnlyDictionary<string, object?>;
+            var envelope = EnvelopeCodec.Make(
+                testCase.GetProperty("urn").GetString()!,
+                data,
+                testCase.GetProperty("queue").GetString()!);
+            using var output = JsonDocument.Parse(EnvelopeCodec.Encode(envelope));
+            var dataJson = JsonSerializer.Serialize(output.RootElement.GetProperty("data"));
+            var expected = testCase.GetProperty("expect_encoded_data_json").GetString();
+            if (expected != dataJson)
+            {
+                violations.Add($"{name}: encoded data expected {expected} but was {dataJson}");
+            }
+        }
+        else if (mode == "decode")
+        {
+            var raw = File.ReadAllText(Path.Combine(
+                AppContext.BaseDirectory, "conformance", testCase.GetProperty("file").GetString()!));
+            var accepted = EnvelopeCodec.Accepts(EnvelopeCodec.Decode(raw));
+            if (testCase.GetProperty("valid").GetBoolean() != accepted)
+            {
+                violations.Add($"{name}: expected valid={testCase.GetProperty("valid").GetBoolean()}");
+            }
+        }
+        else
+        {
+            violations.Add($"{name}: unknown data_shape mode '{mode}'");
+        }
+        return violations;
+    }
+
+    /// <summary>
+    /// ADR-0032 trim section. <c>decode raises</c> maps to <c>Accepts(Decode(...)) == false</c>:
+    /// this decoder never throws, it returns an envelope the consumer then refuses.
+    /// </summary>
+    public static List<string> Trim(JsonElement testCase, Func<string, string> readFixture)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var mode = testCase.GetProperty("mode").GetString();
+        switch (mode)
+        {
+            case "make":
+                return TrimMake(name, testCase);
+            case "decode":
+                return DecodeIdentity(name, testCase, readFixture(testCase.GetProperty("file").GetString()!));
+            case "accepts":
+            {
+                var violations = new List<string>();
+                var envelope = EnvelopeCodec.Decode(readFixture(testCase.GetProperty("file").GetString()!));
+                var expectAccepts = testCase.GetProperty("expect_accepts").GetBoolean();
+                if (EnvelopeCodec.Accepts(envelope) != expectAccepts)
+                {
+                    violations.Add($"{name}: accepts expected {expectAccepts}");
+                }
+                if (testCase.GetProperty("expect_decode_ok").GetBoolean() && EnvelopeCodec.Urn(envelope).Length == 0)
+                {
+                    violations.Add($"{name}: decode must still resolve an identity");
+                }
+                return violations;
+            }
+            case "reemit":
+                return Roundtrip(testCase, readFixture(testCase.GetProperty("file").GetString()!));
+            default:
+                return new List<string> { $"{name}: unknown trim mode '{mode}'" };
+        }
+    }
+
+    private static List<string> TrimMake(string? name, JsonElement testCase)
+    {
+        var violations = new List<string>();
+        var urn = testCase.GetProperty("urn").GetString()!;
+        var traceId = testCase.TryGetProperty("trace_id", out var t) ? t.GetString() : null;
+        var expect = testCase.GetProperty("expect");
+
+        if (expect.ValueKind == JsonValueKind.String && expect.GetString() == "reject")
+        {
+            try
+            {
+                EnvelopeCodec.Make(urn, null, "default", traceId, null);
+                violations.Add($"{name}: make must reject a URN that is empty after trimming");
+            }
+            catch (BabelQueueException)
+            {
+                // expected
+            }
+            return violations;
+        }
+
+        var made = EnvelopeCodec.Make(urn, null, "default", traceId, null);
+        if (expect.TryGetProperty("job", out var job) && made.Job != job.GetString())
+        {
+            violations.Add($"{name}: job expected {job.GetRawText()} but was {JsonSerializer.Serialize(made.Job)}");
+        }
+        if (expect.TryGetProperty("trace_id", out var trace) && made.TraceId != trace.GetString())
+        {
+            violations.Add($"{name}: trace_id expected {trace.GetRawText()} but was {JsonSerializer.Serialize(made.TraceId)}");
+        }
+        return violations;
+    }
+
+    /// <summary>ADR-0032 section 6 job-type section: a non-string <c>job</c> is ignored with a warning.</summary>
+    public static List<string> JobType(JsonElement testCase, Func<string, string> readFixture) =>
+        DecodeIdentity(
+            testCase.GetProperty("name").GetString(),
+            testCase,
+            readFixture(testCase.GetProperty("file").GetString()!));
+
+    private static List<string> DecodeIdentity(string? name, JsonElement testCase, string raw)
+    {
+        var violations = new List<string>();
+        var warnings = new List<string>();
+        var envelope = EnvelopeCodec.Decode(raw, warnings.Add);
+        var urn = EnvelopeCodec.Urn(envelope);
+
+        if (!testCase.GetProperty("valid").GetBoolean())
+        {
+            // The decoder never throws; "decode raises" is a consumer refusal: no usable identity.
+            if (urn.Length != 0 || EnvelopeCodec.Accepts(envelope))
+            {
+                violations.Add($"{name}: decode must not yield a valid identity (got '{urn}')");
+            }
+            return violations;
+        }
+
+        var expectedUrn = testCase.GetProperty("expect").GetProperty("urn").GetString();
+        if (envelope.Job != expectedUrn)
+        {
+            violations.Add($"{name}: identity expected {JsonSerializer.Serialize(expectedUrn)} but was {JsonSerializer.Serialize(envelope.Job)}");
+        }
+        var expectWarning = testCase.GetProperty("expect_warning").GetBoolean();
+        if ((warnings.Count > 0) != expectWarning)
+        {
+            violations.Add($"{name}: expected warning={expectWarning} but got {warnings.Count} warning(s)");
+        }
+        return violations;
+    }
+
+    /// <summary>ADR-0028 traceparent extraction: the header wins, else the envelope <c>trace_id</c>.</summary>
+    public static List<string> Traceparent(JsonElement testCase)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var violations = new List<string>();
+        if (testCase.GetProperty("mode").GetString() != "extract")
+        {
+            return new List<string> { $"{name}: unknown traceparent mode" };
+        }
+
+        var header = testCase.GetProperty("traceparent");
+        var headers = header.ValueKind == JsonValueKind.String
+            ? new Dictionary<string, string> { [Tracing.Traceparent.HeaderTraceparent] = header.GetString()! }
+            : new Dictionary<string, string>();
+        var traceId = testCase.GetProperty("trace_id").GetString()!;
+        var expect = testCase.GetProperty("expect");
+
+        var parent = Tracing.Traceparent.RemoteParentFromHeaders(headers);
+        string source;
+        string traceIdHex;
+        string? spanIdHex = null;
+        string? flags = null;
+        if (parent is { } context)
+        {
+            source = "traceparent";
+            traceIdHex = context.TraceId.ToHexString();
+            spanIdHex = context.SpanId.ToHexString();
+            flags = ((int)context.TraceFlags).ToString("x2", System.Globalization.CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            source = "trace_id";
+            traceIdHex = Tracing.Telemetry.TraceIdOf(traceId).ToHexString();
+        }
+
+        void Check(string field, string? expected, string? actual)
+        {
+            if (expected != actual)
+            {
+                violations.Add($"{name}: {field} expected '{expected}' but was '{actual}'");
+            }
+        }
+
+        Check("source", expect.GetProperty("source").GetString(), source);
+        Check("trace_id_hex", expect.GetProperty("trace_id_hex").GetString(), traceIdHex);
+        if (expect.TryGetProperty("parent_span_id", out var span))
+        {
+            Check("parent_span_id", span.GetString(), spanIdHex);
+        }
+        if (expect.TryGetProperty("flags", out var flagsExpected))
+        {
+            Check("flags", flagsExpected.GetString(), flags);
+        }
+        return violations;
+    }
+
+    public static List<string> IdempotencyDedupKey(JsonElement dedupKey, Func<string, string> readFixture)
+    {
+        var violations = new List<string>();
+        var envelope = EnvelopeCodec.Decode(readFixture(dedupKey.GetProperty("envelope_file").GetString()!));
+        var expected = dedupKey.GetProperty("expected_key").GetString();
+        if (dedupKey.GetProperty("key_field").GetString() != "meta.id")
+        {
+            violations.Add("dedup_key: the dedupe key must be meta.id");
+        }
+        if (envelope.Meta?.Id != expected)
+        {
+            violations.Add($"dedup_key: meta.id expected '{expected}' but was '{envelope.Meta?.Id}'");
+        }
+        return violations;
+    }
+
+    public static List<string> IdempotencySequence(JsonElement sequence)
+    {
+        var name = sequence.GetProperty("name").GetString();
+        var violations = new List<string>();
+        var store = new InMemoryStore();
+        var runs = 0;
+        var outcome = "ok";
+        var handler = Idempotency.Wrap(store, _ =>
+        {
+            runs++;
+            return outcome == "throw"
+                ? throw new InvalidOperationException("handler failed")
+                : System.Threading.Tasks.Task.CompletedTask;
+        });
+        var template = EnvelopeCodec.Make("urn:acme:a");
+
+        var index = 0;
+        foreach (var delivery in sequence.GetProperty("deliveries").EnumerateArray())
+        {
+            index++;
+            var id = delivery.GetProperty("meta_id").GetString()!;
+            if (delivery.TryGetProperty("forget_before", out var forget) && forget.GetBoolean())
+            {
+                store.Forget(id);
+            }
+            outcome = delivery.TryGetProperty("outcome", out var o) ? o.GetString()! : "ok";
+            var before = runs;
+            var envelope = template with { Meta = template.Meta! with { Id = id } };
+            try
+            {
+                handler(envelope).GetAwaiter().GetResult();
+            }
+            catch (InvalidOperationException)
+            {
+                // a throwing handler leaves the id unmarked; the helper rethrows
+            }
+            var actual = runs > before ? "run" : "skip";
+            var expected = delivery.GetProperty("expect_effect").GetString();
+            if (actual != expected)
+            {
+                violations.Add($"{name}: delivery {index} expected '{expected}' but was '{actual}'");
+            }
+        }
+
+        var expectedEffects = sequence.GetProperty("expected_effects").GetInt32();
+        if (runs != expectedEffects)
+        {
+            violations.Add($"{name}: expected {expectedEffects} effect(s) but the handler ran {runs} time(s)");
+        }
+        return violations;
+    }
 
     private static Dictionary<string, JsonElement> ToExtras(JsonElement element)
         => element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());

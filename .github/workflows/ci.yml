@@ -30,18 +30,44 @@ jobs:
         run: dotnet test -c Release /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:Threshold=90 /p:ThresholdType=line /p:ThresholdStat=total
 
   conformance:
-    name: Conformance suite in sync
+    name: Conformance suite in sync and results complete
     runs-on: ubuntu-latest
+    env:
+      BQ_CONFORMANCE_VERSION: "1.5.0"
+      VENDOR_DIR: tests/BabelQueue.Core.Tests/conformance
     steps:
       - uses: actions/checkout@v7
-      - name: Verify vendored conformance matches the canonical suite
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Fetch fetch.sh from the pinned conformance tag
         run: |
-          git clone --depth 1 --branch v1.4.0 https://github.com/BabelQueue/conformance.git "$RUNNER_TEMP/conformance"
-          diff -u "$RUNNER_TEMP/conformance/CONFORMANCE_VERSION" "tests/BabelQueue.Core.Tests/conformance/CONFORMANCE_VERSION"
-          diff -ru "$RUNNER_TEMP/conformance/manifest.json" "tests/BabelQueue.Core.Tests/conformance/manifest.json"
-          diff -ru "$RUNNER_TEMP/conformance/fixtures"      "tests/BabelQueue.Core.Tests/conformance/fixtures"
-          diff -ru "$RUNNER_TEMP/conformance/schema"        "tests/BabelQueue.Core.Tests/conformance/schema"
-          echo "Vendored conformance is in sync with the canonical suite."
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/fetch.sh" \
+            "https://raw.githubusercontent.com/BabelQueue/conformance/v${BQ_CONFORMANCE_VERSION}/fetch.sh"
+          chmod +x "$RUNNER_TEMP/fetch.sh"
+
+      - name: Verify vendored conformance matches the release asset
+        run: |
+          # Downloads babelqueue-conformance-<version>.tar.gz, verifies it against SHA256SUMS,
+          # then diffs it with the vendored copy (exit 1 on drift).
+          "$RUNNER_TEMP/fetch.sh" --check "$BQ_CONFORMANCE_VERSION" "$VENDOR_DIR"
+
+      - name: Test (writes results.json)
+        env:
+          BQ_CONFORMANCE_RESULTS: ${{ runner.temp }}/results.json
+        run: dotnet test -c Release
+
+      - name: Validate results.json against the schema
+        run: |
+          pipx run check-jsonschema==0.33.0 \
+            --schemafile "$VENDOR_DIR/schema/results.schema.json" \
+            "$RUNNER_TEMP/results.json"
+
+      - name: Fail on missing bindings, missing sections or failing cases
+        run: python3 scripts/check-conformance-results.py "$RUNNER_TEMP/results.json" "$VENDOR_DIR/manifest.json"
 
   ci-green:
     name: CI green
