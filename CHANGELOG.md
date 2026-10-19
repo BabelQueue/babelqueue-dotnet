@@ -9,6 +9,23 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-19
+
+Implements ADR-0032 (conformance packaging, results format, ASCII trim and the non-string `job` rule).
+The envelope stays at `schema_version: 1`.
+
+### Changed
+- `make`'s `trace_id` trim and the blank checks in `Accepts` and `Redrive` use the closed ASCII set (space,
+  `\t`, `\n`, `\v`, `\f`, `\r`); Unicode whitespace that `Trim()` / `string.IsNullOrWhiteSpace` matched no
+  longer counts (ADR-0032 section 5).
+- Decode: a non-string `job` is ignored with a warning and a valid string `urn` takes over; a non-string
+  `urn` needed as the fallback is ignored with its own warning (ADR-0032 section 6).
+
+### Added
+- Conformance runner covers the v1.5.0 sections and writes `results.json` (ADR-0032 section 2);
+  `scripts/check-conformance-results.py` gates its completeness in CI, and the release attaches it as an
+  asset. CI fetches and verifies the conformance v1.5.0 release asset.
+
 ## [1.11.0] - 2026-10-17
 
 Implements ADR-0031 (producer `meta` write API, encode-time rejection, closed ASCII blank set).
