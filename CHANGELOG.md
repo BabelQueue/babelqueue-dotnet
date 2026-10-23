@@ -9,6 +9,17 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+Implements ADR-0034 section 9 (retry backoff). The envelope stays at `schema_version: 1`.
+
+### Added
+- `RetryBackoffPolicy` / `RetryJitter`: the shared worker-side retry backoff
+  `d(n) = min(RetryBackoffMax, RetryBackoff * RetryBackoffMultiplier^(n-1))` (seconds, `n = attempts + 1`,
+  `RetryBackoffMax = 0` = no cap) with `none` (default) or `full` (`uniform(0, d(n))`) jitter. The defaults
+  yield a delay of `0`, so nothing changes until a transport configures it. Kafka does not apply it (its
+  retry tier sets the delay).
+- Conformance runner covers the v1.6.0 `retry_backoff` section; the vendored suite is now v1.6.0 and CI
+  verifies `fetch.sh` against a pinned sha256 (`BQ_FETCH_SH_SHA256`) before running it.
+
 ## [1.12.0] - 2026-10-19
 
 Implements ADR-0032 (conformance packaging, results format, ASCII trim and the non-string `job` rule).

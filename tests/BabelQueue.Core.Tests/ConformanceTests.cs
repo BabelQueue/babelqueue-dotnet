@@ -278,6 +278,7 @@ internal sealed class ConformanceResults
             ["trim"] = section => Named("trim", section, c => Check(ConformanceRunner.Trim(c, ReadFixture))),
             ["job_type"] = section => Named("job_type", section, c => Check(ConformanceRunner.JobType(c, ReadFixture))),
             ["traceparent"] = section => Named("traceparent", section, c => Check(ConformanceRunner.Traceparent(c))),
+            ["retry_backoff"] = section => Named("retry_backoff", section, c => Check(ConformanceRunner.RetryBackoff(c))),
         };
 
     public string ConformanceVersion { get; private init; } = string.Empty;

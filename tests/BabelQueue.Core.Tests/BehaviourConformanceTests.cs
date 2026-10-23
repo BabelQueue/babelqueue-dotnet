@@ -878,6 +878,62 @@ internal static class ConformanceRunner
         return violations;
     }
 
+    /// <summary>
+    /// ADR-0034 section 9 retry backoff: <c>none</c> must equal <c>expect_delay_seconds</c> exactly; <c>full</c>
+    /// is <c>uniform(0, d(n))</c>, so over a few draws (both extremes included) the delay stays within
+    /// <c>expect_delay_range_seconds</c>.
+    /// </summary>
+    public static List<string> RetryBackoff(JsonElement testCase)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var violations = new List<string>();
+        var n = testCase.GetProperty("n").GetInt32();
+        var jitter = testCase.GetProperty("retry_jitter").GetString()!;
+
+        RetryBackoffPolicy Build(Func<double>? random) => new(
+            testCase.GetProperty("retry_backoff").GetDouble(),
+            testCase.GetProperty("retry_backoff_multiplier").GetDouble(),
+            testCase.GetProperty("retry_backoff_max").GetDouble(),
+            jitter,
+            random);
+
+        if (jitter == RetryJitter.None)
+        {
+            var expected = testCase.GetProperty("expect_delay_seconds").GetDouble();
+            var actual = Build(null).DelaySeconds(n);
+            if (actual != expected)
+            {
+                violations.Add($"{name}: expected delay {expected} but was {actual}");
+            }
+            return violations;
+        }
+
+        var range = testCase.GetProperty("expect_delay_range_seconds");
+        var min = range.GetProperty("min").GetDouble();
+        var max = range.GetProperty("max").GetDouble();
+        var draws = new[] { 0.0, 0.25, 0.5, 0.999999, 0.123456 };
+        foreach (var draw in draws)
+        {
+            var d = draw;
+            var delay = Build(() => d).DelaySeconds(n);
+            if (delay < min || delay > max)
+            {
+                violations.Add($"{name}: delay {delay} (draw {draw}) outside [{min}, {max}]");
+            }
+        }
+        // The default (Random.Shared) source must stay in range too.
+        var policy = Build(null);
+        for (var i = 0; i < 20; i++)
+        {
+            var delay = policy.DelaySeconds(n);
+            if (delay < min || delay > max)
+            {
+                violations.Add($"{name}: delay {delay} (default source) outside [{min}, {max}]");
+            }
+        }
+        return violations;
+    }
+
     /// <summary>ADR-0028 traceparent extraction: the header wins, else the envelope <c>trace_id</c>.</summary>
     public static List<string> Traceparent(JsonElement testCase)
     {
