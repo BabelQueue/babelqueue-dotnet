@@ -9,6 +9,8 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-24
+
 Implements ADR-0034 section 9 (retry backoff). The envelope stays at `schema_version: 1`.
 
 ### Added
