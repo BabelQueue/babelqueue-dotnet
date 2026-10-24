@@ -934,6 +934,98 @@ internal static class ConformanceRunner
         return violations;
     }
 
+    private static readonly JsonDocumentOptions DeepJson = new() { MaxDepth = 10_100 };
+
+    /// <summary>
+    /// ADR-0035 poison DLQ record: a spliced object keeps every original byte, anything else is the
+    /// <c>raw</c> wrapper (base64 + <c>raw_encoding</c> for invalid UTF-8); U+FFFD never appears.
+    /// </summary>
+    public static List<string> PoisonDlq(JsonElement testCase, string originalQueue)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var violations = new List<string>();
+        var bytes = testCase.TryGetProperty("body_base64", out var b64)
+            ? Convert.FromBase64String(b64.GetString()!)
+            : System.Text.Encoding.UTF8.GetBytes(testCase.GetProperty("body").GetString()!);
+        var expect = testCase.GetProperty("expect");
+        var shape = expect.GetProperty("shape").GetString()!;
+
+        var deadLetter = "{\"reason\":\"poison\",\"original_queue\":\"" + originalQueue + "\",\"attempts\":0}";
+        var record = PoisonRecord.Build(bytes, deadLetter);
+        var text = System.Text.Encoding.UTF8.GetString(record);
+        if (text.Contains('\uFFFD', StringComparison.Ordinal))
+        {
+            violations.Add($"{name}: the record holds U+FFFD");
+        }
+
+        using var doc = JsonDocument.Parse(record, DeepJson);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            violations.Add($"{name}: the record is not a JSON object");
+            return violations;
+        }
+        var deadLetters = doc.RootElement.EnumerateObject().Where(p => p.Name == "dead_letter").ToList();
+        if (deadLetters.Count != 1)
+        {
+            violations.Add($"{name}: the record must carry exactly one top-level dead_letter");
+            return violations;
+        }
+        var without = doc.RootElement.EnumerateObject().Where(p => p.Name != "dead_letter").ToList();
+        var want = expect.GetProperty("record");
+
+        if (shape == "splice_or_wrapper" && !SameMembers(without, want))
+        {
+            foreach (var literal in expect.GetProperty("splice_literals").EnumerateArray())
+            {
+                if (!text.Contains(literal.GetString()!, StringComparison.Ordinal))
+                {
+                    violations.Add($"{name}: the record does not contain {literal.GetString()} verbatim");
+                }
+            }
+            if (without.Any(p => p.Name is "raw" or "raw_encoding"))
+            {
+                violations.Add($"{name}: a spliced record has a top-level raw / raw_encoding member");
+            }
+            var keys = without.Select(p => p.Name).Distinct(StringComparer.Ordinal).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            var wantKeys = expect.GetProperty("splice_keys").EnumerateArray().Select(k => k.GetString()!).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            if (!keys.SequenceEqual(wantKeys))
+            {
+                violations.Add($"{name}: top-level members {string.Join(",", keys)}, expected {string.Join(",", wantKeys)}");
+            }
+            return violations;
+        }
+
+        if (!SameMembers(without, want))
+        {
+            violations.Add($"{name}: the record without dead_letter differs from the expected record: {text}");
+        }
+        return violations;
+    }
+
+    private static bool SameMembers(List<JsonProperty> members, JsonElement want)
+    {
+        var wantMembers = want.EnumerateObject().ToList();
+        return members.Count == wantMembers.Count
+            && members.All(m => wantMembers.Count(w => w.Name == m.Name && SameJson(m.Value, w.Value)) == 1);
+    }
+
+    private static bool SameJson(JsonElement a, JsonElement b)
+    {
+        if (a.ValueKind != b.ValueKind)
+        {
+            return false;
+        }
+        return a.ValueKind switch
+        {
+            JsonValueKind.Object => SameMembers(a.EnumerateObject().ToList(), b),
+            JsonValueKind.Array => a.GetArrayLength() == b.GetArrayLength()
+                && a.EnumerateArray().Zip(b.EnumerateArray(), SameJson).All(x => x),
+            JsonValueKind.String => a.GetString() == b.GetString(),
+            JsonValueKind.Number => a.GetRawText() == b.GetRawText(),
+            _ => true,
+        };
+    }
+
     /// <summary>ADR-0028 traceparent extraction: the header wins, else the envelope <c>trace_id</c>.</summary>
     public static List<string> Traceparent(JsonElement testCase)
     {

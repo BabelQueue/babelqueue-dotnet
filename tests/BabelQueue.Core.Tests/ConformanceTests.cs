@@ -279,6 +279,7 @@ internal sealed class ConformanceResults
             ["job_type"] = section => Named("job_type", section, c => Check(ConformanceRunner.JobType(c, ReadFixture))),
             ["traceparent"] = section => Named("traceparent", section, c => Check(ConformanceRunner.Traceparent(c))),
             ["retry_backoff"] = section => Named("retry_backoff", section, c => Check(ConformanceRunner.RetryBackoff(c))),
+            ["poison_dlq"] = section => Named("poison_dlq", section, c => Check(ConformanceRunner.PoisonDlq(c, section.GetProperty("original_queue").GetString()!))),
         };
 
     public string ConformanceVersion { get; private init; } = string.Empty;

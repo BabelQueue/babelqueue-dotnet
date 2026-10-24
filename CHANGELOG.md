@@ -12,11 +12,15 @@ The envelope wire format is versioned separately by `meta.schema_version`
 Implements ADR-0034 section 9 (retry backoff). The envelope stays at `schema_version: 1`.
 
 ### Added
+- `PoisonRecord.Build` now validates that `deadLetterJson` is a single JSON object (`ArgumentNullException` / `ArgumentException` otherwise); regression tests added.
 - `RetryBackoffPolicy` / `RetryJitter`: the shared worker-side retry backoff
   `d(n) = min(RetryBackoffMax, RetryBackoff * RetryBackoffMultiplier^(n-1))` (seconds, `n = attempts + 1`,
   `RetryBackoffMax = 0` = no cap) with `none` (default) or `full` (`uniform(0, d(n))`) jitter. The defaults
   yield a delay of `0`, so nothing changes until a transport configures it. Kafka does not apply it (its
   retry tier sets the delay).
+- `PoisonRecord.Build(body, deadLetterJson)`: the DLQ record of a poison body per ADR-0035 (a strict JSON
+  object is spliced byte-for-byte, anything else becomes `{"raw", "raw_encoding"?, "dead_letter"}` with lossless
+  base64 for invalid UTF-8, never U+FFFD). The conformance runner covers the core-scope `poison_dlq` section.
 - Conformance runner covers the v1.6.0 `retry_backoff` section; the vendored suite is now v1.6.0 and CI
   verifies `fetch.sh` against a pinned sha256 (`BQ_FETCH_SH_SHA256`) before running it.
 
