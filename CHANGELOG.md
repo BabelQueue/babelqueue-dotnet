@@ -10,8 +10,9 @@ The envelope wire format is versioned separately by `meta.schema_version`
 ## [Unreleased]
 
 Implements ADR-0038 (OpenTelemetry semantic-conventions alignment) and ADR-0039 (standard metrics) for the
-`System.Diagnostics` tracing helpers in `BabelQueue.Core`. The envelope stays at `schema_version: 1`; nothing
-on the wire changes and no package dependency is added (GR-7).
+`System.Diagnostics` tracing helpers in `BabelQueue.Core`, and ADR-0036 decision 4 (body classification) with the
+additive `BodyVerdict` API. The envelope stays at `schema_version: 1`; nothing on the wire changes and no package
+dependency is added (GR-7).
 
 ### Changed (dashboard-breaking, ADR-0038 section 5)
 - Span names are now `send <queue>` (producer) and `process <queue>` (consumer); they were `publish <urn>` and
@@ -58,7 +59,20 @@ on the wire changes and no package dependency is added (GR-7).
   through `System.Diagnostics.Trace`, once per distinct value, and preserves the value byte for byte
   (message-envelope.md section 5.1).
 - The vendored conformance suite is now v1.9.0. The runner covers the `span-shape`, `trace-id` and `metrics` sections
-  and the core-scope `identity_verdict` section added in v1.7.0.
+  and the core-scope `identity_verdict` section added in v1.7.0 (97 cases, all passing).
+- `BodyVerdict.Classify(string?)` (ADR-0036 decision 4, ADR-0032 section 6): a strict, never-throwing classifier that
+  returns a `BodyVerdictResult` (`Kind` of `BodyVerdictKind.Ok` or `Poison`, plus a `Cause`). A body is `Ok` when it
+  decodes into an envelope with a valid identity; it is `Poison` when it is not one JSON object, when a known member
+  has the wrong type (for example `attempts: "3"` or `data: []`), when it nests deeper than `BodyVerdict.CoreMaxDepth`
+  (64), or when neither `job` nor `urn` is a non-blank string. It lets a consumer park a malformed body on the poison
+  route. `BodyVerdictKind.Poison` is the zero value, so `default(BodyVerdictResult)` is poison, never `Ok`.
+  **`EnvelopeCodec.Decode` is unchanged**: it stays lenient about member types, with the same signatures and behaviour.
+- The nesting limit (64) is .NET-specific: Go and Node accept 10000 levels, PHP 511, Java 256, Python depends on the
+  interpreter (ADR-0036 decision 4, "SDK note").
+- Documented platform deviation (owner decision 2026-10-31; recorded in ADR-0036 decision 4, "SDK note"): a body holding a lone UTF-16 surrogate escape (`"\ud800"`) anywhere is `Poison` here,
+  because System.Text.Json cannot materialise it and `EnvelopeCodec.Decode` throws `InvalidOperationException` on it
+  (so an `Ok` body is always one `Decode` returns for). The Go, Python and Node classifiers accept such a body; the
+  conformance suite has no `identity_verdict` case for it.
 
 ### Deprecated
 - Removed in the next MINOR: the dual-emitted span attributes `messaging.operation` and
@@ -66,12 +80,6 @@ on the wire changes and no package dependency is added (GR-7).
   `babelqueue.attempts`.
 - Leaving `system` out (the `babelqueue` default) is deprecated. What an absent value means once the deprecation window
   ends is not decided yet (ADR-0038 section 5); it is not scheduled for removal.
-
-### Known gap
-- Conformance `identity_verdict` expects a body with a valid identity but a wrongly typed `attempts` or `data` to be
-  `poison`. `EnvelopeCodec.Decode` is lenient about member types, so the core reports `ok` for those two cases
-  (`identity with wrong typed attempts`, `identity with wrong typed data`); they are `fail` in `results.json`. The
-  type check lives in the transport packages today.
 
 ## [1.13.0] - 2026-10-24
 

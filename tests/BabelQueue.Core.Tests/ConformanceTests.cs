@@ -187,12 +187,7 @@ public class ConformanceResultsTests
             .Where(x => x.Result.Status == "fail")
             .ToList();
 
-        // The documented identity_verdict core-decoder gap (see OtelConformanceRunner.IdentityVerdictGapNames) stays
-        // in results.json as `fail`; only this test tolerates it, and it requires both to still be failing.
-        var gapIds = failures.Where(f => f.Section == "identity_verdict" && OtelConformanceRunner.IdentityVerdictGapNames.Contains(f.Case))
-            .Select(f => f.Case).OrderBy(c => c, StringComparer.Ordinal).ToList();
         var failureLines = failures
-            .Where(f => !(f.Section == "identity_verdict" && OtelConformanceRunner.IdentityVerdictGapNames.Contains(f.Case)))
             .Select(f => $"{f.Section}/{f.Case}: {f.Result.Reason}")
             .ToList();
 
@@ -202,7 +197,6 @@ public class ConformanceResultsTests
             File.WriteAllText(path, results.ToJson());
         }
 
-        Assert.Equal(OtelConformanceRunner.IdentityVerdictGapNames.OrderBy(c => c, StringComparer.Ordinal), gapIds);
         Assert.True(failureLines.Count == 0, string.Join(Environment.NewLine, failureLines));
     }
 

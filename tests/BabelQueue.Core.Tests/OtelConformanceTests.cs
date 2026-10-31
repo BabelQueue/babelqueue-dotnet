@@ -62,21 +62,13 @@ public sealed class OtelConformanceTests
     }
 
     [Fact]
-    public void IdentityVerdictSectionClassifiesRawBodiesLikeTheDecoder()
+    public void IdentityVerdictSectionClassifiesRawBodiesLikeTheBodyVerdict()
     {
         // core-scope section added in conformance v1.7.0 (ADR-0036 decision 4); vendored here with v1.9.0
         var cases = Cases("identity_verdict");
 
-        // the documented gap: still failing (remove it from IdentityVerdictGapNames once the decoder agrees)
-        foreach (var gap in cases.Where(c => OtelConformanceRunner.IdentityVerdictGapNames.Contains(c.GetProperty("name").GetString()!)))
-        {
-            Assert.NotEmpty(OtelConformanceRunner.IdentityVerdict(gap));
-        }
-
-        var violations = cases
-            .Where(c => !OtelConformanceRunner.IdentityVerdictGapNames.Contains(c.GetProperty("name").GetString()!))
-            .SelectMany(OtelConformanceRunner.IdentityVerdict)
-            .ToList();
+        Assert.Equal(97, cases.Count);
+        var violations = cases.SelectMany(OtelConformanceRunner.IdentityVerdict).ToList();
         Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
     }
 
@@ -692,42 +684,21 @@ internal static class OtelConformanceRunner
     // ----------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// The two <c>identity_verdict</c> cases (a valid identity next to a wrongly typed known member:
-    /// <c>attempts</c> a string, <c>data</c> an array) that the .NET core decoder cannot satisfy today. The
-    /// vendored suite expects <c>poison</c>; <see cref="EnvelopeCodec.Decode(string)"/> is deliberately lenient
-    /// about member types (it maps them to defaults) and the type check lives in the transport packages (for
-    /// example <c>KafkaConsumer.DecodeFailure</c>), so the core says <c>ok</c>. Conformance v1.7.0 added this
-    /// section, and this package was pinned to v1.6.0 until the v1.9.0 vendor bump surfaced the gap. It is a
-    /// real failure: results.json reports it as <c>fail</c> and the CI completeness gate stays red until
-    /// the core decoder parity is decided (reported as KARAR GEREKIYOR). Only the xunit result test tolerates
-    /// exactly these two, so the rest of the suite stays usable; it fails if either one starts passing.
+    /// Runs one <c>identity_verdict</c> case: the raw <c>body</c> goes to <see cref="BodyVerdict.Classify(string?)"/>, the
+    /// core's strict body classifier (ADR-0036 decision 4), and its verdict must equal <c>expect</c>. The lenient
+    /// <see cref="EnvelopeCodec.Decode(string)"/> is not the oracle: it maps a wrongly typed known member to a default.
     /// </summary>
-    public static readonly IReadOnlyList<string> IdentityVerdictGapNames = new[]
-    {
-        "identity with wrong typed attempts",
-        "identity with wrong typed data",
-    };
-
     public static List<string> IdentityVerdict(JsonElement testCase)
     {
         var name = testCase.GetProperty("name").GetString();
         var body = testCase.GetProperty("body").GetString()!;
         var want = testCase.GetProperty("expect").GetString();
 
-        string verdict;
-        try
-        {
-            var envelope = EnvelopeCodec.Decode(body, static _ => { });
-            verdict = EnvelopeCodec.Urn(envelope).Length > 0 ? "ok" : "poison";
-        }
-        catch (Exception e) when (e is JsonException or BabelQueueException or InvalidOperationException or ArgumentException)
-        {
-            verdict = "poison";
-        }
+        var verdict = BodyVerdict.Classify(body).IsOk ? "ok" : "poison";
 
         return verdict == want
             ? new List<string>()
-            : new List<string> { $"{name}: expected verdict '{want}' but the decoder gave '{verdict}'" };
+            : new List<string> { $"{name}: expected verdict '{want}' but the body verdict is '{verdict}'" };
     }
 
     // ----------------------------------------------------------------------------------------------
