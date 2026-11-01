@@ -9,6 +9,8 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-01
+
 Implements ADR-0038 (OpenTelemetry semantic-conventions alignment) and ADR-0039 (standard metrics) for the
 `System.Diagnostics` tracing helpers in `BabelQueue.Core`, and ADR-0036 decision 4 (body classification) with the
 additive `BodyVerdict` API. The envelope stays at `schema_version: 1`; nothing on the wire changes and no package
