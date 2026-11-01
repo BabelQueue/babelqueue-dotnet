@@ -9,6 +9,80 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-01
+
+Implements ADR-0038 (OpenTelemetry semantic-conventions alignment) and ADR-0039 (standard metrics) for the
+`System.Diagnostics` tracing helpers in `BabelQueue.Core`, and ADR-0036 decision 4 (body classification) with the
+additive `BodyVerdict` API. The envelope stays at `schema_version: 1`; nothing on the wire changes and no package
+dependency is added (GR-7).
+
+### Changed (dashboard-breaking, ADR-0038 section 5)
+- Span names are now `send <queue>` (producer) and `process <queue>` (consumer); they were `publish <urn>` and
+  `process <urn>`. With no destination (a blank `meta.queue`) the name is the bare `send` / `process`. The URN is
+  never in the span name; it is the `babelqueue.urn` attribute.
+- The producer span's `messaging.destination.name` is the queue it publishes to; it was the URN. It is not written
+  when the queue is blank.
+- `messaging.system` is the new optional `system` argument (for example `"kafka"`, `"rabbitmq"`, `"aws_sqs"`,
+  `"servicebus"`, `"pulsar"`, `"activemq"`, `"redis"`; see `Telemetry.Systems`). **Omitting it keeps `babelqueue` and
+  that default is deprecated** (it matches no APM messaging view). A value outside the set is written as given.
+- A `null` queue given to `PublishAsync` is treated as `"default"`, as `EnvelopeCodec.Make` does, so the span's
+  destination equals the produced `meta.queue`.
+- Consumer attributes are set when the span starts (a sampler can read them); they used to be set afterwards.
+- A failing publish or handler now also sets `error.type` (the exception's full type name, `_OTHER` if none) next to
+  the existing error status and `exception` event. On a failing publish the envelope's `messaging.message.id` and
+  `messaging.message.conversation_id` are on the span (they were set only after a successful send).
+
+### Added
+- `Telemetry.Wrap(handler, headers, system, consumerGroup)` and `Telemetry.PublishAsync(..., queue, system)`: optional
+  `system` and `consumerGroup` (`messaging.consumer.group.name`, consumer span only, written whenever given). Existing
+  signatures are unchanged in source and in binary: `Wrap(handler)`, `Wrap(handler, headers)` and both pre-existing
+  `PublishAsync` shapes (with a required `queue`, hidden from IntelliSense) stay as their own methods and forward to the
+  new overloads with `system: null`, so assemblies compiled against 1.13 keep binding to them and no call shape is
+  ambiguous.
+- New span attributes: `messaging.operation.type`, `messaging.operation.name`, `babelqueue.urn`,
+  `babelqueue.schema_version`, `babelqueue.attempts`; the producer also writes `messaging.message.conversation_id`.
+- `Telemetry.SemconvVersion` (`1.44.0`) and `Telemetry.SchemaUrl` (`https://opentelemetry.io/schemas/1.44.0`). The
+  `net8.0` `ActivitySource` and `Meter` cannot carry a schema URL, so the core only exposes the constant; the source
+  and meter are created with the library version.
+- Metrics (ADR-0039) on `Meter("BabelQueue")` (`TelemetryMetrics`): `messaging.process.duration` (histogram, `s`),
+  `messaging.client.sent.messages`, `messaging.client.consumed.messages`, `babelqueue.retries` and
+  `babelqueue.dlq.messages` (counters, `{message}`). Attributes are only `messaging.system`,
+  `messaging.operation.name`, `messaging.destination.name` (when known) and `error.type` (on failure); no URN, id,
+  trace id, attempts or reason. Only the metric-name constants and the read-only `AdvisoryBucketBoundaries` are public;
+  the instruments themselves are internal, so nothing outside the SDK can record on them. The instruments always exist and a listener collects them only when it subscribes
+  (`AddMeter("BabelQueue")`). `net8.0` cannot attach the advisory bucket boundaries, so they are exposed as
+  `TelemetryMetrics.AdvisoryBucketBoundaries` for a view.
+- Dead-letter observer seam (ADR-0039 section 5.1): `IDeadLetterObserver`, `DeadLetterEvent(Queue, DeadLetterQueue,
+  Reason)` and `DeadLetterObservers.NotifySafely` (catches and logs an observer exception so it cannot change the
+  settle outcome), plus `MetricsDeadLetterObserver(system)` which increments `babelqueue.dlq.messages`. The core has no
+  consume runtime or DLQ write point, so nothing calls the observer yet; the transport packages wire it in a later
+  release.
+- A `trace_id` that is not a UUID is still mapped by hashing (unchanged); the consumer helper now logs a warning
+  through `System.Diagnostics.Trace`, once per distinct value, and preserves the value byte for byte
+  (message-envelope.md section 5.1).
+- The vendored conformance suite is now v1.9.0. The runner covers the `span-shape`, `trace-id` and `metrics` sections
+  and the core-scope `identity_verdict` section added in v1.7.0 (97 cases, all passing).
+- `BodyVerdict.Classify(string?)` (ADR-0036 decision 4, ADR-0032 section 6): a strict, never-throwing classifier that
+  returns a `BodyVerdictResult` (`Kind` of `BodyVerdictKind.Ok` or `Poison`, plus a `Cause`). A body is `Ok` when it
+  decodes into an envelope with a valid identity; it is `Poison` when it is not one JSON object, when a known member
+  has the wrong type (for example `attempts: "3"` or `data: []`), when it nests deeper than `BodyVerdict.CoreMaxDepth`
+  (64), or when neither `job` nor `urn` is a non-blank string. It lets a consumer park a malformed body on the poison
+  route. `BodyVerdictKind.Poison` is the zero value, so `default(BodyVerdictResult)` is poison, never `Ok`.
+  **`EnvelopeCodec.Decode` is unchanged**: it stays lenient about member types, with the same signatures and behaviour.
+- The nesting limit (64) is .NET-specific: Go and Node accept 10000 levels, PHP 511, Java 256, Python depends on the
+  interpreter (ADR-0036 decision 4, "SDK note").
+- Documented platform deviation (owner decision 2026-10-31; recorded in ADR-0036 decision 4, "SDK note"): a body holding a lone UTF-16 surrogate escape (`"\ud800"`) anywhere is `Poison` here,
+  because System.Text.Json cannot materialise it and `EnvelopeCodec.Decode` throws `InvalidOperationException` on it
+  (so an `Ok` body is always one `Decode` returns for). The Go, Python and Node classifiers accept such a body; the
+  conformance suite has no `identity_verdict` case for it.
+
+### Deprecated
+- Removed in the next MINOR: the dual-emitted span attributes `messaging.operation` and
+  `messaging.babelqueue.attempts`; use `messaging.operation.type` / `messaging.operation.name` and
+  `babelqueue.attempts`.
+- Leaving `system` out (the `babelqueue` default) is deprecated. What an absent value means once the deprecation window
+  ends is not decided yet (ADR-0038 section 5); it is not scheduled for removal.
+
 ## [1.13.0] - 2026-10-24
 
 Implements ADR-0034 section 9 (retry backoff). The envelope stays at `schema_version: 1`.
