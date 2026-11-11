@@ -276,6 +276,7 @@ internal sealed class ConformanceResults
             ["idempotency"] = IdempotencyCases,
             ["payload_schema"] = section => PayloadCases("payload_schema", section),
             ["payload_schema_unicode"] = section => PayloadCases("payload_schema_unicode", section),
+            ["payload_schema_keywords"] = section => Named("payload_schema_keywords", section, c => Check(ConformanceRunner.PayloadSchemaKeywordsCase(c))),
             ["roundtrip"] = section => Named("roundtrip", section, c => Check(ConformanceRunner.Roundtrip(c, Fixture(c)))),
             ["data_shape"] = section => Named("data_shape", section, c => Check(ConformanceRunner.DataShape(c))),
             ["forbidden_keys"] = section => Named("forbidden_keys", section, c => Check(ConformanceRunner.ForbiddenKey(c, Fixture(c)))),

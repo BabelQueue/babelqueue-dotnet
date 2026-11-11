@@ -733,6 +733,58 @@ internal static class ConformanceRunner
             : new List<string> { $"{name}: expected valid={expected} but the validator said valid={isValid}" };
     }
 
+    /// <summary>
+    /// The <c>payload_schema_keywords</c> section: unlike <c>payload_schema</c> every case carries its own
+    /// <c>schema</c>. The runner registers it (collecting the warnings the registration produces), validates
+    /// <c>data</c> and compares both the verdict and the warnings as a set of (pointer, keyword) pairs.
+    /// </summary>
+    public static List<string> PayloadSchemaKeywordsCase(JsonElement testCase)
+    {
+        var name = testCase.GetProperty("name").GetString();
+        var schema = SchemaJson.Parse(testCase.GetProperty("schema").GetRawText())
+            as IReadOnlyDictionary<string, object?>;
+        var data = SchemaJson.Parse(testCase.GetProperty("data").GetRawText())
+            as IReadOnlyDictionary<string, object?>;
+        if (schema is null || data is null)
+        {
+            return new List<string> { $"{name}: case schema/data is not an object" };
+        }
+
+        var violations = new List<string>();
+        var produced = new List<RegisteredSchemaWarning>();
+        _ = new MapProvider(
+            new Dictionary<string, IReadOnlyDictionary<string, object?>> { ["urn:test:case"] = schema },
+            produced.Add);
+
+        var expected = testCase.GetProperty("valid").GetBoolean();
+        var isValid = PayloadValidator.Validate(schema, data) is null;
+        if (expected != isValid)
+        {
+            violations.Add($"{name}: expected valid={expected} but the validator said valid={isValid}");
+        }
+
+        var expectedWarnings = new HashSet<(string, string)>();
+        if (testCase.TryGetProperty("warnings", out var listed))
+        {
+            foreach (var w in listed.EnumerateArray())
+            {
+                expectedWarnings.Add((w.GetProperty("pointer").GetString()!, w.GetProperty("keyword").GetString()!));
+            }
+        }
+        var actualWarnings = produced.Select(w => (w.Warning.Location, w.Warning.Keyword)).ToHashSet();
+        if (!expectedWarnings.SetEquals(actualWarnings))
+        {
+            violations.Add($"{name}: expected warnings [{string.Join(", ", expectedWarnings.OrderBy(x => x))}] "
+                + $"but got [{string.Join(", ", actualWarnings.OrderBy(x => x))}]");
+        }
+        if (actualWarnings.Count != produced.Count)
+        {
+            violations.Add($"{name}: expected one warning per occurrence but got {produced.Count} for {actualWarnings.Count} distinct");
+        }
+
+        return violations;
+    }
+
     public static List<string> DataShape(JsonElement testCase)
     {
         var name = testCase.GetProperty("name").GetString();

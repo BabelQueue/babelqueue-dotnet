@@ -9,6 +9,36 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+Brings the opt-in payload validator (ADR-0024, `BabelQueue.Schema`) to parity with the other SDKs, as locked by the
+`payload_schema_keywords` section of conformance 1.10.0. The envelope stays at `schema_version: 1`; nothing changes on
+the wire and no package dependency is added (GR-7).
+
+### Added
+- Union `type`: `"type": ["string", "null"]` is valid when the value matches ANY listed type, and the keywords of the
+  matching type (`minLength`, `minimum`, `properties`, ...) still apply. `integer` accepts every whole-valued number
+  (`1.0`, `1e2`, `1.00m`).
+- `maxLength` (counted in Unicode code points, like `minLength`).
+- Registration-time warnings for keywords outside the supported subset: `PayloadValidator.Warnings(schema)` returns one
+  `SchemaWarning(Location, Keyword)` per occurrence (`Location` is the RFC 6901 pointer of the schema object carrying the
+  keyword), and `MapProvider` reports them when the schemas are registered, each as a `RegisteredSchemaWarning(Urn, Warning)` so
+  the operator can tell which URN's schema carries it, through an `Action<RegisteredSchemaWarning>` hook
+  (`new MapProvider(schemas, onWarning)` / `MapProvider.FromJson(raw, onWarning)`; `Trace.TraceWarning` by default) and
+  keeps them in `MapProvider.Warnings`. Annotation keywords (`$schema`, `$id`, `title`, `description`, `examples`,
+  `default`, `$comment`, `x-*`) never warn.
+
+### Fixed
+- `const` / `enum` compare numbers by mathematical value, recursively inside arrays and objects: `1`, `1.0` and `1e0` are
+  equal and `2.5` equals `2.50` whatever the numeric type (`long`, `int`, `double`, `decimal`, `BigInteger`, ...). A
+  boolean or a string is still never equal to a number. Previously a `long` const never matched a `double` value.
+- `minLength` is enforced whatever numeric type the schema carries. It was only read when it was a `long`, so
+  `"minLength": 2.0` (a `double`, or any other numeric type) was silently ignored; such a schema now rejects strings
+  shorter than the limit, as the Java, Node and Python validators do. Schemas that carry an integer `minLength` are
+  unaffected.
+
+### Changed
+- Vendored conformance suite bumped to 1.10.0 (new `payload_schema_keywords` section, run by the conformance tests and
+  recorded in `results.json`).
+
 ## [1.14.0] - 2026-11-01
 
 Implements ADR-0038 (OpenTelemetry semantic-conventions alignment) and ADR-0039 (standard metrics) for the
