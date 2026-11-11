@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using BabelQueue.Schema;
 using Xunit;
@@ -37,5 +38,27 @@ public class PayloadSchemaConformanceTests
             violations.AddRange(ConformanceRunner.PayloadSchemaCase(schema, testCase));
         }
         Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void KeywordCasesMatchAcrossSdks()
+    {
+        var violations = new List<string>();
+        using var doc = JsonDocument.Parse(File.ReadAllText(SuitePath("manifest.json")));
+        var cases = doc.RootElement.GetProperty("payload_schema_keywords").GetProperty("cases").EnumerateArray().ToList();
+        Assert.NotEmpty(cases);
+        foreach (var testCase in cases)
+        {
+            violations.AddRange(ConformanceRunner.PayloadSchemaKeywordsCase(testCase));
+        }
+        Assert.True(violations.Count == 0, string.Join(Environment.NewLine, violations));
+    }
+
+    [Fact]
+    public void RunnerReportsAWarningThatWasNotExpected()
+    {
+        using var doc = JsonDocument.Parse(
+            "{\"name\":\"x\",\"schema\":{\"type\":\"string\",\"pattern\":\"a\"},\"data\":{},\"valid\":false}");
+        Assert.NotEmpty(ConformanceRunner.PayloadSchemaKeywordsCase(doc.RootElement));
     }
 }
