@@ -9,6 +9,8 @@ The envelope wire format is versioned separately by `meta.schema_version`
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-11
+
 Brings the opt-in payload validator (ADR-0024, `BabelQueue.Schema`) to parity with the other SDKs, as locked by the
 `payload_schema_keywords` section of conformance 1.10.0. The envelope stays at `schema_version: 1`; nothing changes on
 the wire and no package dependency is added (GR-7).
