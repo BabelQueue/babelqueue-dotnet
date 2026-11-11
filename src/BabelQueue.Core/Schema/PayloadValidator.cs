@@ -261,12 +261,16 @@ public static class PayloadValidator
 
         // minLength counts Unicode code points (JSON Schema / ECMA-262), not UTF-16 units:
         // "çğü" is 3, an astral emoji is 1 — matching the other SDK validators.
-        if (schema.TryGetValue("minLength", out var ml) && TryDouble(ml, out var min) && CodePointLength(str) < min)
+        // A fractional bound is truncated toward zero (2.5 -> 2), as the Go, PHP, Python and Java validators do;
+        // a non-finite one (NaN / +-Infinity, only reachable from a hand-built schema) is ignored.
+        if (schema.TryGetValue("minLength", out var ml) && TryDouble(ml, out var min) && double.IsFinite(min)
+            && CodePointLength(str) < Math.Truncate(min))
         {
             return Violation(path, "below_min_length");
         }
 
-        if (schema.TryGetValue("maxLength", out var xl) && TryDouble(xl, out var max) && CodePointLength(str) > max)
+        if (schema.TryGetValue("maxLength", out var xl) && TryDouble(xl, out var max) && double.IsFinite(max)
+            && CodePointLength(str) > Math.Truncate(max))
         {
             return Violation(path, "above_max_length");
         }

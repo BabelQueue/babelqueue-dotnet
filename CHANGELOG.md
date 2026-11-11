@@ -34,6 +34,9 @@ the wire and no package dependency is added (GR-7).
   `"minLength": 2.0` (a `double`, or any other numeric type) was silently ignored; such a schema now rejects strings
   shorter than the limit, as the Java, Node and Python validators do. Schemas that carry an integer `minLength` are
   unaffected.
+- A fractional `minLength` / `maxLength` is truncated toward zero (`2.5` is `2`) before the comparison, like the Go, PHP,
+  Python and Java validators, so `{"type":"string","minLength":2.5}` accepts `"ab"` on every SDK. A non-finite bound
+  (`NaN`, `±Infinity`; only reachable from a hand-built schema) is ignored.
 
 ### Changed
 - Vendored conformance suite bumped to 1.10.0 (new `payload_schema_keywords` section, run by the conformance tests and

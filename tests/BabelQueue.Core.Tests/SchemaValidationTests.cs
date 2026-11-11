@@ -161,6 +161,40 @@ public class SchemaValidationTests
     }
 
     [Fact]
+    public void FractionalLengthBoundsAreTruncatedTowardZero()
+    {
+        // Like Go/PHP/Python/Java: minLength 2.5 behaves as 2, maxLength 2.9 behaves as 2.
+        var min = Json("{\"type\":\"string\",\"minLength\":2.5}");
+        Assert.Null(PayloadValidator.Validate(min, "ab"));
+        Assert.NotNull(PayloadValidator.Validate(min, "a"));
+
+        var max = Json("{\"type\":\"string\",\"maxLength\":2.9}");
+        Assert.Null(PayloadValidator.Validate(max, "ab"));
+        Assert.NotNull(PayloadValidator.Validate(max, "abc"));
+
+        // A negative fractional bound truncates to 0 (not -0.5): only the empty string fits maxLength.
+        var negMax = Json("{\"type\":\"string\",\"maxLength\":-0.5}");
+        Assert.Null(PayloadValidator.Validate(negMax, ""));
+        Assert.NotNull(PayloadValidator.Validate(negMax, "a"));
+        Assert.Null(PayloadValidator.Validate(Json("{\"type\":\"string\",\"minLength\":-0.5}"), ""));
+    }
+
+    [Theory]
+    [InlineData("minLength")]
+    [InlineData("maxLength")]
+    public void NonFiniteLengthBoundsAreIgnored(string keyword)
+    {
+        foreach (var bound in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        {
+            var schema = new Dictionary<string, object?> { ["type"] = "string", [keyword] = bound };
+            foreach (var text in new[] { "", "a", "abc" })
+            {
+                Assert.Null(PayloadValidator.Validate(schema, text));
+            }
+        }
+    }
+
+    [Fact]
     public void ConstAndEnumCompareNumbersByValueAcrossNumericTypes()
     {
         var one = Json("{\"const\":1}");
